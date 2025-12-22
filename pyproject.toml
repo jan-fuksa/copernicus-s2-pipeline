@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "s2pipe"
+version = "0.1.0"
+description = "Sentinel-2 CDSE download pipeline (Step 1) with manifest + table export."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+dependencies = [
+  "requests>=2.31",
+  "tqdm>=4.66",
+  "python-dateutil>=2.9",
+  "shapely>=2.0",
+  "pyproj>=3.6",
+  "pandas>=2.1",
+  "openpyxl>=3.1",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+s2pipe = "s2pipe.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
