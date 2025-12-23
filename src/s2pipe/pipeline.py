@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,7 +17,9 @@ from .cdse.select import select_assets_l1c, select_assets_l2a
 from .cdse.download import download_node, pair_dir
 from .io.paths import make_paths, ensure_dirs
 from .io.manifest import (
-    FileItem, LevelFiles, PairEntry, PairKey, ProductInfo, new_manifest, write_manifest_json
+    FileItem, LevelFiles, PairEntry, PairKey, ProductInfo,
+    new_manifest, write_manifest_json,
+    run_id_now, update_download_index,
 )
 from .io.export import pairs_to_dataframe, export_table
 
@@ -239,15 +241,32 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
             pairs=pair_entries,
         )
-        manifest_path = paths.manifest_dir / cfg.manifest.json_name
+        # write per-run outputs under meta/manifest/runs/<RUN_ID>/
+        run_id = run_id_now()
+        runs_dirname = cfg.manifest.runs_dir
+        run_dir = paths.manifest_dir / runs_dirname / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest_path = run_dir / cfg.manifest.json_name
         write_manifest_json(m, manifest_path)
 
+        # Load pairs (dict form) from the run manifest, then update aggregated index.json.
+        pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get("pairs", [])
+        index_name = cfg.manifest.index_name
+        index_path = paths.manifest_dir / index_name
+        update_download_index(
+            index_path=index_path,
+            manifest_version=cfg.manifest.manifest_version,
+            out_dir=str(paths.root),
+            layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
+            new_pairs=pairs_payload,
+        )
+
     if cfg.manifest.export_table and manifest_path is not None:
-        # Export from structured pairs
-        pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8"))["pairs"]
+        # Export per-run 2D table next to the run manifest
         df = pairs_to_dataframe(pairs_payload)
-        table_csv_path = paths.manifest_dir / cfg.manifest.table_csv_name
-        table_xlsx_path = paths.manifest_dir / cfg.manifest.table_xlsx_name
+        table_csv_path = manifest_path.parent / cfg.manifest.table_csv_name
+        table_xlsx_path = manifest_path.parent / cfg.manifest.table_xlsx_name
         export_table(df, csv_path=str(table_csv_path), xlsx_path=str(table_xlsx_path))
 
     return RunResult(
