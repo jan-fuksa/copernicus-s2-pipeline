@@ -74,7 +74,6 @@ def _cfg_from_dict(d: dict[str, Any], *, out_dir_override: str | None = None, dr
         write_json=bool(man.get("write_json", True)),
         json_name=str(man.get("json_name", "manifest.json")),
         export_table=bool(man.get("export_table", True)),
-        table_flatten_local_paths=bool(man.get("table_flatten_local_paths", False)),
         table_csv_name=str(man.get("table_csv_name", "manifest_table.csv")),
         table_xlsx_name=str(man.get("table_xlsx_name", "manifest_table.xlsx")),
         store_geofootprint=bool(man.get("store_geofootprint", True)),
