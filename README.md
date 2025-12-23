@@ -48,3 +48,30 @@ print("Manifest:", result.manifest_path)
 ```bash
 s2pipe download --config examples/configs/download.yaml --dry-run
 ```
+
+## Disclaimer
+
+This project is an independent, open-source client for Copernicus Data Space Ecosystem (CDSE) APIs 
+and is not affiliated with or endorsed by ESA, the European Commission, or CDSE service providers. 
+Users are responsible for complying with CDSE [Terms & Conditions](https://dataspace.copernicus.eu/terms-and-conditions) 
+and applicable policies.
+
+### Data licensing and attribution (Copernicus Sentinel)
+
+Copernicus Sentinel data are provided on a free, full and open basis; 
+use is governed by the [Legal notice on the use of Copernicus Sentinel Data and Service Information](https://sentinels.copernicus.eu/documents/247904/690755/Sentinel_Data_Legal_Notice). 
+
+When you communicate to the public or distribute Copernicus Sentinel data, include the following source notice:
+
+* `Copernicus Sentinel data [Year]`
+
+If you publish results that include modified/adapted Sentinel data, include:
+
+* `Contains modified Copernicus Sentinel data [Year]`
+
+### Note on CDSE portal content (web pages, images, documents)
+
+This repository does not include CDSE portal content (web texts, images, documents). 
+Such portal materials are intended for non-commercial use 
+and are subject to additional restrictions on redistribution/derivative works; 
+do not commit downloaded portal assets into this repository.
