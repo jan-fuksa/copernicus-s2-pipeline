@@ -140,6 +140,12 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         file_items_l2a: list[FileItem] = []
 
         if not cfg.download.dry_run:
+            # Ensure directories exist before writing provenance files and downloading assets
+            l1c_root.parent.mkdir(parents=True, exist_ok=True)  # .../sensing=...Z/
+            l2a_root.parent.mkdir(parents=True, exist_ok=True)
+            l1c_root.mkdir(parents=True, exist_ok=True)  # .../sensing=...Z/files/
+            l2a_root.mkdir(parents=True, exist_ok=True)
+
             # Optional: keep basic provenance
             (l1c_root.parent / "product_id.txt").write_text(l1c.cdse_id, encoding="utf-8")
             (l1c_root.parent / "product_name.txt").write_text(l1c.name, encoding="utf-8")
