@@ -12,6 +12,8 @@ class FileItem:
     role: str
     path: str
     band: Optional[str] = None
+    planned: bool = False   # True => planned only (dry-run)
+    present: bool = False   # True => file physically exists on disk
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class PairEntry:
 class DownloadManifest:
     manifest_version: str
     created_utc: str
+    dry_run: bool
     pipeline: dict[str, Any]
     query: dict[str, Any]
     output: dict[str, Any]
@@ -77,6 +80,7 @@ def new_manifest(
     *,
     manifest_version: str,
     query: dict[str, Any],
+    dry_run: bool,
     out_dir: str,
     layout: str,
     pairs: list[PairEntry],
@@ -84,6 +88,7 @@ def new_manifest(
     return DownloadManifest(
         manifest_version=manifest_version,
         created_utc=_utc_now_iso(),
+        dry_run=dry_run,
         pipeline={"name": "s2pipe", "stage": "download", "stage_version": "1.0"},
         query=query,
         output={"out_dir": out_dir, "layout": layout},

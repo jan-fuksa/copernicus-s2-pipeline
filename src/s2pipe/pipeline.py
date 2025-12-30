@@ -134,7 +134,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         nodes_l1c = select_assets_l1c(idx_l1c, cfg.selection)
         nodes_l2a = select_assets_l2a(idx_l2a, cfg.selection)
 
-        # Download
+        # Download paths
         l1c_root = pair_dir(paths.raw_l1c, tile_id=tile, sensing_compact=sensing_compact)
         l2a_root = pair_dir(paths.raw_l2a, tile_id=tile, sensing_compact=sensing_compact)
 
@@ -157,9 +157,23 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         for n in nodes_l1c:
             fn = n.parts[-1]
             dst = l1c_root / fn
+            role = "tile_metadata" if fn == "MTD_TL.xml" else ("band" if fn.lower().endswith(".jp2") else "file")
+            band = None
+            if role == "band":
+                # try to parse band suffix like "_B02.jp2"
+                m = re.search(r"_B(\d\d|8A)\.jp2$", fn)
+                if m:
+                    band = "B" + m.group(1)
             if cfg.download.dry_run:
                 # still record intended path
-                pass
+                file_items_l1c.append(
+                    FileItem(
+                        role=role,
+                        path=str(dst.relative_to(paths.root)),
+                        band=band,
+                        planned=True
+                    )
+                )
             else:
                 download_node(
                     client,
@@ -169,19 +183,29 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                     overwrite=cfg.download.overwrite,
                     chunk_size=cfg.download.chunk_size_bytes,
                 )
-            role = "tile_metadata" if fn == "MTD_TL.xml" else ("band" if fn.lower().endswith(".jp2") else "file")
-            band = None
-            if role == "band":
-                # try to parse band suffix like "_B02.jp2"
-                m = re.search(r"_B(\d\d|8A)\.jp2$", fn)
-                if m:
-                    band = "B" + m.group(1)
-            file_items_l1c.append(FileItem(role=role, path=str(dst.relative_to(paths.root)), band=band))
+                file_items_l1c.append(
+                    FileItem(
+                        role=role,
+                        path=str(dst.relative_to(paths.root)),
+                        band=band,
+                        planned=False,
+                        present=True
+                    )
+                )
 
         for n in nodes_l2a:
             fn = n.parts[-1]
             dst = l2a_root / fn
-            if not cfg.download.dry_run:
+            role = "tile_metadata" if fn == "MTD_TL.xml" else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
+            if cfg.download.dry_run:
+                file_items_l2a.append(
+                    FileItem(
+                        role=role,
+                        path=str(dst.relative_to(paths.root)),
+                        planned=True
+                    )
+                )
+            else:
                 download_node(
                     client,
                     product_id=l2a.cdse_id,
@@ -190,8 +214,14 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                     overwrite=cfg.download.overwrite,
                     chunk_size=cfg.download.chunk_size_bytes,
                 )
-            role = "tile_metadata" if fn == "MTD_TL.xml" else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
-            file_items_l2a.append(FileItem(role=role, path=str(dst.relative_to(paths.root))))
+                file_items_l2a.append(
+                    FileItem(
+                        role=role,
+                        path=str(dst.relative_to(paths.root)),
+                        planned=False,
+                        present=True
+                    )
+                )
 
         ps1 = parse_safe_name(l1c.name)
         ps2 = parse_safe_name(l2a.name)
@@ -237,6 +267,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         m = new_manifest(
             manifest_version=cfg.manifest.manifest_version,
             query=q,
+            dry_run=cfg.download.dry_run,
             out_dir=str(paths.root),
             layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
             pairs=pair_entries,
@@ -250,17 +281,20 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         manifest_path = run_dir / cfg.manifest.json_name
         write_manifest_json(m, manifest_path)
 
-        # Load pairs (dict form) from the run manifest, then update aggregated index.json.
+        # Load pairs (dict form) from the run manifest
         pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get("pairs", [])
-        index_name = cfg.manifest.index_name
-        index_path = paths.manifest_dir / index_name
-        update_download_index(
-            index_path=index_path,
-            manifest_version=cfg.manifest.manifest_version,
-            out_dir=str(paths.root),
-            layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
-            new_pairs=pairs_payload,
-        )
+
+        # update aggregated index.json.
+        if not cfg.download.dry_run:
+            index_name = cfg.manifest.index_name
+            index_path = paths.manifest_dir / index_name
+            update_download_index(
+                index_path=index_path,
+                manifest_version=cfg.manifest.manifest_version,
+                out_dir=str(paths.root),
+                layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
+                new_pairs=pairs_payload,
+            )
 
     if cfg.manifest.export_table and manifest_path is not None:
         # Export per-run 2D table next to the run manifest
