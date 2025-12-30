@@ -20,6 +20,7 @@ from .io.manifest import (
     FileItem, LevelFiles, PairEntry, PairKey, ProductInfo,
     new_manifest, write_manifest_json,
     run_id_now, update_download_index,
+    parse_scl_percentages_from_mtd_tl,
 )
 from .io.export import pairs_to_dataframe, export_table
 
@@ -193,10 +194,14 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                     )
                 )
 
+        l2a_mtd_tl_path: Path | None = None
+
         for n in nodes_l2a:
             fn = n.parts[-1]
             dst = l2a_root / fn
             role = "tile_metadata" if fn == "MTD_TL.xml" else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
+            if role == "tile_metadata":
+                l2a_mtd_tl_path = dst
             if cfg.download.dry_run:
                 file_items_l2a.append(
                     FileItem(
@@ -226,6 +231,10 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         ps1 = parse_safe_name(l1c.name)
         ps2 = parse_safe_name(l2a.name)
 
+        scl_pct: dict[str, float] | None = None
+        if l2a_mtd_tl_path is not None and l2a_mtd_tl_path.exists():
+            scl_pct = parse_scl_percentages_from_mtd_tl(l2a_mtd_tl_path)
+
         l1c_info = ProductInfo(
             product_id=l1c.cdse_id,
             product_name=l1c.name,
@@ -240,6 +249,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             product_name=l2a.name,
             baseline=ps2.baseline,
             rel_orbit=ps2.rel_orbit,
+            scl_percentages=scl_pct,
         )
 
         pair_entries.append(PairEntry(

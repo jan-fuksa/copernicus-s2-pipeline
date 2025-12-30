@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Tuple, Optional, Sequence
+import xml.etree.ElementTree as ET
 
 
 @dataclass(frozen=True)
@@ -31,7 +32,7 @@ class ProductInfo:
     cloud_cover: Optional[float] = None
     geofootprint: Optional[dict[str, Any]] = None
     coverage_ratio: Optional[float] = None
-
+    scl_percentages: Optional[dict[str, float]] = None
 
 @dataclass(frozen=True)
 class PairKey:
@@ -57,6 +58,32 @@ class DownloadManifest:
     query: dict[str, Any]
     output: dict[str, Any]
     pairs: list[PairEntry]
+
+
+def parse_scl_percentages_from_mtd_tl(xml_path: Path) -> dict[str, float]:
+    """
+    Extract all *PERCENTAGE fields from L2A tile metadata (MTD_TL.xml).
+    Returns dict like {"VEGETATION_PERCENTAGE": 41.0, ...}.
+    """
+    root = ET.parse(xml_path).getroot()
+    out: dict[str, float] = {}
+
+    for el in root.iter():
+        tag = el.tag.split("}")[-1]  # drop namespace
+        if not tag.endswith("_PERCENTAGE"):
+            continue
+
+        txt = (el.text or "").strip()
+        if not txt:
+            continue
+
+        try:
+            out[tag] = float(txt)
+        except ValueError:
+            # ignore non-numeric
+            continue
+
+    return out
 
 
 def _utc_now_iso() -> str:
@@ -124,15 +151,28 @@ def merge_index_pairs(
 ) -> tuple[list[dict[str, Any]], int]:
     """Keep-first merge, dedupe by (tile_id, sensing_start_utc). Returns (merged, added_count)."""
     merged = list(existing_pairs)
-    seen = {_pair_key(p) for p in existing_pairs}
+    seen = { _pair_key(p): p for p in merged }
+
     added = 0
     for p in new_pairs:
         key = _pair_key(p)
-        if key in seen:
+        if key not in seen:
+            merged.append(p)
+            seen[key] = p
+            added += 1
             continue
-        merged.append(p)
-        seen.add(key)
-        added += 1
+
+        # fill missing scl_percentages if available
+        old = seen[key]
+        try:
+            old_l2a = old.get("l2a") or {}
+            new_l2a = p.get("l2a") or {}
+            if old_l2a.get("scl_percentages") is None and isinstance(new_l2a.get("scl_percentages"), dict):
+                old_l2a["scl_percentages"] = new_l2a["scl_percentages"]
+                old["l2a"] = old_l2a
+        except Exception:
+            pass
+
     return merged, added
 
 
