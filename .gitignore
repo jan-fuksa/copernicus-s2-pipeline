@@ -12,3 +12,4 @@ build/
 out/
 out_local/
 tools/
+tests/fixtures/step1_single_tile
