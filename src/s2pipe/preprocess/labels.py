@@ -44,6 +44,26 @@ def _infer_label_dtype(mapping: dict[int, int] | None, ignore_index: int) -> np.
     return np.dtype(np.int32)
 
 
+def _sparse_counts_dict(counts: np.ndarray) -> dict[str, int]:
+    """Convert dense counts to sparse dict with string keys (JSON-friendly)."""
+    nz = np.nonzero(counts)[0]
+    return {str(int(i)): int(counts[i]) for i in nz}
+
+
+def _sparse_pct_dict(counts: np.ndarray, total: int) -> dict[str, float]:
+    """Convert dense counts to sparse pct dict (JSON-friendly)."""
+    if total <= 0:
+        return {}
+    nz = np.nonzero(counts)[0]
+    tot = float(total)
+    return {str(int(i)): float(counts[i]) / tot for i in nz}
+
+
+def _hist_counts_fixed_range(a: np.ndarray, value_range: int) -> np.ndarray:
+    """Fast histogram with fixed minlength (assumes values in [0, value_range-1])."""
+    return np.bincount(a.ravel(), minlength=int(value_range))
+
+
 def _apply_mapping_lut(
     a: np.ndarray,
     mapping: dict[int, int],
@@ -54,13 +74,11 @@ def _apply_mapping_lut(
 ) -> np.ndarray:
     """Apply mapping via LUT of fixed length `src_value_range`.
 
-    Assumptions:
-      - source labels are integers in [0, src_value_range-1]
-      - unknown values (not present in mapping) become ignore_index (LUT default)
+    Fast path when ignore_index < src_value_range (default SCL: 255 < 256):
+        out = lut[a]   (expects values within range; config guarantees this)
 
-    This is intentionally optimized for SCL (uint8, range 256) and avoids:
-      - a.max()
-      - int64 conversion
+    Safe path when ignore_index >= src_value_range:
+        out filled with ignore; only in-range values are LUT-mapped.
     """
     if a.ndim != 2:
         raise ValueError(f"Expected 2D label array, got ndim={a.ndim}.")
@@ -70,7 +88,6 @@ def _apply_mapping_lut(
         raise ValueError(f"Expected integer label dtype, got {a.dtype}.")
 
     lut = np.full((int(src_value_range),), int(ignore_index), dtype=out_dtype)
-
     for k, v in mapping.items():
         kk = int(k)
         if kk < 0 or kk >= src_value_range:
@@ -80,23 +97,44 @@ def _apply_mapping_lut(
             )
         lut[kk] = int(v)
 
-    # Fast path: direct LUT indexing (expects values within range).
-    # If config is wrong and values exceed the LUT size, NumPy will raise IndexError.
-    return lut[a]
+    if int(ignore_index) < int(src_value_range):
+        # Fast path (SCL default)
+        return lut[a]
+
+    # Safe path
+    out = np.full(a.shape, int(ignore_index), dtype=out_dtype)
+    valid = (a >= 0) & (a < int(src_value_range))
+    if np.any(valid):
+        out[valid] = lut[a[valid]]
+    return out
 
 
-def scl_to_labels(
+def _label_hist_len_for_dtype(
+    out_dtype: np.dtype, mapping: dict[int, int] | None, ignore_index: int
+) -> int:
+    """Pick a histogram length for final labels without scanning y for max."""
+    if out_dtype == np.dtype(np.uint8):
+        return 256
+    if out_dtype == np.dtype(np.uint16):
+        return 65536
+    max_val = int(ignore_index)
+    if mapping:
+        max_val = max(max_val, max(int(v) for v in mapping.values()))
+    return max_val + 1
+
+
+def scl_to_labels_with_meta(
     *,
     scl: Raster,
     dst_grid: RasterGrid,
     cfg: LabelConfig,
-) -> Raster:
-    """Convert Sentinel-2 SCL raster to training labels on dst_grid.
+) -> tuple[Raster, dict]:
+    """Convert SCL to labels on dst_grid, and return per-sample label metadata.
 
-    Steps:
-      1) Resample SCL to dst_grid using nearest (categorical).
-      2) Optionally apply cfg.mapping via LUT; unknown -> ignore_index.
-      3) Output is single-band label raster as 2D (H, W).
+    Metadata includes:
+      - valid_pixel_ratio, valid_pixel_count, total_pixel_count
+      - scl_counts/scl_pct (SCL after resampling to dst_grid, before mapping)
+      - label_counts/label_pct (final labels after mapping)
     """
     if cfg.resample != "nearest":
         raise ValueError(f"Label resampling must be 'nearest', got {cfg.resample!r}.")
@@ -109,31 +147,73 @@ def scl_to_labels(
         band_names=(scl.band_names[:1] if scl.band_names else None),
     )
 
-    # Nearest is required for categorical labels.
+    # Nearest for categorical data. Pixels outside coverage become ignore_index.
     scl_rs = resample_raster(
         scl_single,
         dst_grid,
         method="nearest",
         dst_nodata=int(cfg.ignore_index),
     )
-    a = _ensure_2d_label_array(scl_rs.array)
+    scl_on_target = _ensure_2d_label_array(scl_rs.array)
 
     out_dtype = _infer_label_dtype(cfg.mapping, int(cfg.ignore_index))
 
     if cfg.mapping is None:
-        y = a.astype(out_dtype, copy=False)
+        y = scl_on_target.astype(out_dtype, copy=False)
     else:
         y = _apply_mapping_lut(
-            a,
+            scl_on_target,
             cfg.mapping,
             ignore_index=int(cfg.ignore_index),
             src_value_range=int(cfg.src_value_range),
             out_dtype=out_dtype,
         )
 
-    return Raster(
+    total_pixels = int(y.size)
+    valid_pixels = int(np.count_nonzero(y != int(cfg.ignore_index)))
+    valid_pixel_ratio = (
+        float(valid_pixels) / float(total_pixels) if total_pixels > 0 else 0.0
+    )
+
+    # Histograms: fixed-length where possible, without extra scans/conversions.
+    scl_counts = _hist_counts_fixed_range(
+        scl_on_target, int(cfg.src_value_range)
+    ).astype(np.int64, copy=False)
+    label_hist_len = _label_hist_len_for_dtype(
+        out_dtype, cfg.mapping, int(cfg.ignore_index)
+    )
+    label_counts = np.bincount(y.ravel(), minlength=int(label_hist_len)).astype(
+        np.int64, copy=False
+    )
+
+    meta = {
+        "ignore_index": int(cfg.ignore_index),
+        "mapping": cfg.mapping,
+        "src_value_range": int(cfg.src_value_range),
+        "valid_pixel_ratio": valid_pixel_ratio,
+        "valid_pixel_count": valid_pixels,
+        "total_pixel_count": total_pixels,
+        "scl_counts": _sparse_counts_dict(scl_counts),
+        "scl_pct": _sparse_pct_dict(scl_counts, total_pixels),
+        "label_counts": _sparse_counts_dict(label_counts),
+        "label_pct": _sparse_pct_dict(label_counts, total_pixels),
+    }
+
+    raster_y = Raster(
         array=y,
         grid=dst_grid,
         nodata=int(cfg.ignore_index),
         band_names=["label"],
     )
+    return raster_y, meta
+
+
+def scl_to_labels(
+    *,
+    scl: Raster,
+    dst_grid: RasterGrid,
+    cfg: LabelConfig,
+) -> Raster:
+    """Wrapper returning only the label raster."""
+    y, _ = scl_to_labels_with_meta(scl=scl, dst_grid=dst_grid, cfg=cfg)
+    return y
