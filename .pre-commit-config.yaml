@@ -1,0 +1,19 @@
+repos:
+  # --- Python lint & format (Ruff) ---
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.4
+    hooks:
+      - id: ruff  # just control, without --fix
+      - id: ruff-format
+        args: [--check]  # just control, without file change
+
+  # --- General sanity hooks (text, yaml, json, conflicts) ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-yaml
+      - id: check-json
