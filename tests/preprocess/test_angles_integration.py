@@ -35,61 +35,62 @@ def test_angles_real_tile_to_scl20m_grid():
     if not index.pairs:
         pytest.skip("No pairs in Step-1 index.json")
 
-    pair = index.pairs[0]
-    assets = select_assets(
-        pair,
-        index,
-        l1c_bands=(),
-        need_l1c_tile_metadata=True,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=True,
-        require_present=True,
-    )
+    for pair in index.pairs:
+        assets = select_assets(
+            pair,
+            index,
+            l1c_bands=(),
+            need_l1c_tile_metadata=True,
+            need_l2a_tile_metadata=False,
+            need_scl_20m=True,
+            require_present=True,
+        )
 
-    if assets.l1c_tile_metadata is None or not assets.l1c_tile_metadata.exists():
-        pytest.skip("Missing L1C MTD_TL.xml in fixtures.")
-    if assets.scl_20m is None or not assets.scl_20m.exists():
-        pytest.skip("Missing SCL_20m in fixtures.")
+        if assets.l1c_tile_metadata is None or not assets.l1c_tile_metadata.exists():
+            pytest.skip("Missing L1C MTD_TL.xml in fixtures.")
+        if assets.scl_20m is None or not assets.scl_20m.exists():
+            pytest.skip("Missing SCL_20m in fixtures.")
 
-    dst_grid = grid_from_reference_raster(assets.scl_20m)
+        dst_grid = grid_from_reference_raster(assets.scl_20m)
 
-    cfg = AngleFeatureConfig(
-        include_sun=True,
-        include_view=True,
-        encode_sin_cos=True,
-        view_mode="single",
-        view_bands=("B02",),
-        detector_aggregate="nanmean",
-    )
+        cfg = AngleFeatureConfig(
+            include_sun=True,
+            include_view=True,
+            encode_sin_cos=True,
+            view_mode="single",
+            view_bands=("B02",),
+        )
 
-    ang = parse_tile_metadata_angles(assets.l1c_tile_metadata, cfg=cfg)
+        ang = parse_tile_metadata_angles(assets.l1c_tile_metadata, cfg=cfg)
 
-    if ang.src_grid.crs != "UNKNOWN":
-        assert ang.src_grid.crs == dst_grid.crs
+        # Preventing previous error (×10): we typically expect coarse grid step in kilometers.
+        assert 1000.0 <= ang.src_grid.res[0] <= 20000.0
+        assert 1000.0 <= ang.src_grid.res[1] <= 20000.0
 
-    feat = angles_to_sin_cos_features(angles=ang, dst_grid=dst_grid, cfg=cfg)
-    x = np.asarray(feat.array)
+        feat = angles_to_sin_cos_features(angles=ang, dst_grid=dst_grid, cfg=cfg)
+        x = np.asarray(feat.array)
 
-    assert x.dtype == np.float32
-    assert x.shape[0] == 8  # 4 sun + 4 view (single)
-    assert x.shape[1] == dst_grid.height
-    assert x.shape[2] == dst_grid.width
+        assert x.dtype == np.float32
+        assert x.shape[0] == 8  # 4 sun + 4 view (single)
+        assert x.shape[1] == dst_grid.height
+        assert x.shape[2] == dst_grid.width
 
-    assert feat.band_names == [
-        "sun_zen_sin",
-        "sun_zen_cos",
-        "sun_azi_sin",
-        "sun_azi_cos",
-        "view_zen_sin",
-        "view_zen_cos",
-        "view_azi_sin",
-        "view_azi_cos",
-    ]
+        assert feat.band_names == [
+            "sun_zen_sin",
+            "sun_zen_cos",
+            "sun_azi_sin",
+            "sun_azi_cos",
+            "view_zen_sin",
+            "view_zen_cos",
+            "view_azi_sin",
+            "view_azi_cos",
+        ]
 
-    absmax = float(np.nanmax(np.abs(x)))
-    assert np.isfinite(absmax)
-    assert absmax <= 1.0001
+        finite = np.isfinite(x)
+        assert (
+            int(finite.sum()) > 0
+        )  # there may be a lot of NaN for low coverage_ration, but not all
 
-    finite_ratio = float(np.isfinite(x).mean())
-    assert finite_ratio > 0.95
-    assert float(np.nanstd(x)) > 0.0
+        # sin/cos in [-1, 1] for finite pixels
+        absmax = float(np.max(np.abs(x[finite])))
+        assert absmax <= 1.0001

@@ -198,7 +198,12 @@ def _parse_tile_size(root: ET.Element, resolution: int) -> tuple[int, int] | Non
 def _parse_sampling_params(
     root: ET.Element,
 ) -> tuple[float | None, float | None, float, float]:
-    """Parse COL_STEP, ROW_STEP, COL_START, ROW_START from the XML (best-effort)."""
+    """Parse COL_STEP, ROW_STEP, COL_START, ROW_START from the XML (best-effort).
+
+    Note:
+      In real Sentinel-2 MTD_TL.xml, COL_STEP/ROW_STEP for angle grids are typically already in meters
+      (e.g. 5000). In synthetic tests they might be in pixels (e.g. 1).
+    """
     col_step = _text_float(_find_first(root, "COL_STEP"))
     row_step = _text_float(_find_first(root, "ROW_STEP"))
     col_start = _text_float(_find_first(root, "COL_START"))
@@ -212,28 +217,51 @@ def _parse_sampling_params(
     return col_step, row_step, float(col_start), float(row_start)
 
 
+def _step_to_meters(value: float, pixel_size_m: float) -> float:
+    """Convert sampling step value to meters.
+
+    Heuristic:
+      - if value is large (>=1000), treat it as meters (typical: 5000 m)
+      - otherwise treat it as 'pixels' and multiply by pixel size (XDIM/YDIM magnitude)
+    """
+    v = float(value)
+    if abs(v) >= 1000.0:
+        return v
+    return v * float(pixel_size_m)
+
+
 def _build_angle_grid(
     *,
     crs: str,
     ulx: float,
     uly: float,
-    xdim: float,
-    ydim: float,
-    col_step: float,
-    row_step: float,
-    col_start: float,
-    row_start: float,
+    col_step_m: float,
+    row_step_m: float,
+    col_start_m: float,
+    row_start_m: float,
     width: int,
     height: int,
 ) -> RasterGrid:
-    xres = float(xdim) * float(col_step)
-    yres = float(ydim) * float(row_step)
-    x0 = float(ulx) + float(col_start) * float(xdim)
-    y0 = float(uly) + float(row_start) * float(ydim)
-    transform = Affine(xres, 0.0, x0, 0.0, yres, y0)
-    res = (abs(xres), abs(yres))
+    """Build coarse angle-grid georeferencing.
+
+    The angle grid is north-up. ULX/ULY are the tile's upper-left in CRS units (meters in UTM).
+    The coarse grid is defined by steps in meters.
+    """
+    xres = float(abs(col_step_m))
+    yres = float(abs(row_step_m))
+
+    x0 = float(ulx) + float(col_start_m)
+    y0 = float(uly) - float(row_start_m)
+
+    transform = Affine(xres, 0.0, x0, 0.0, -yres, y0)
+    res = (xres, yres)
+
     return RasterGrid(
-        crs=str(crs), transform=transform, width=int(width), height=int(height), res=res
+        crs=str(crs),
+        transform=transform,
+        width=int(width),
+        height=int(height),
+        res=res,
     )
 
 
@@ -247,14 +275,11 @@ def _parse_band_name(band_id_raw: str | None) -> str:
 
 
 def _parse_view_grids_from_repeated_elements(root: ET.Element) -> list[ET.Element]:
-    """Return per-detector view elements when they are encoded as repeated Viewing_Incidence_Angles_Grids."""
-    # In many MTD_TL.xml files, each detector grid is itself an element named Viewing_Incidence_Angles_Grids
-    # with attributes bandId=... detectorId=..., and has children Zenith/Azimuth.
+    """Return per-detector view elements encoded as repeated Viewing_Incidence_Angles_Grids."""
     out: list[ET.Element] = []
     for el in root.iter():
         if _local(el.tag) != "Viewing_Incidence_Angles_Grids":
             continue
-        # Heuristic: treat only elements that actually contain Zenith/Azimuth as per-detector grids.
         if _find_first(el, "Zenith") is None or _find_first(el, "Azimuth") is None:
             continue
         out.append(el)
@@ -264,6 +289,8 @@ def _parse_view_grids_from_repeated_elements(root: ET.Element) -> list[ET.Elemen
 def _parse_view_grids_from_container(root: ET.Element) -> list[ET.Element]:
     """Fallback for schemas that use a container with child Viewing_Incidence_Angles_Grid elements."""
     container = _find_first(root, "Viewing_Incidence_Angles_Grids")
+    if container is None:
+        container = _find_first(root, "Viewing_Incidence_Angle_List")
     if container is None:
         container = _find_first(root, "Viewing_Incidence_Angles_Grid_List")
     if container is None:
@@ -303,8 +330,9 @@ def parse_tile_metadata_angles(
     # --- Sun angles ---
     sun_zen: np.ndarray | None = None
     sun_azi: np.ndarray | None = None
-    sun_grid_w: int | None = None
-    sun_grid_h: int | None = None
+
+    width: int | None = None
+    height: int | None = None
 
     if cfg.include_sun:
         sun_grid = _find_first(root, "Sun_Angles_Grid")
@@ -323,38 +351,7 @@ def parse_tile_metadata_angles(
                 f"Sun angles shape mismatch: zenith={sun_zen.shape} azimuth={sun_azi.shape}"
             )
 
-        sun_grid_h, sun_grid_w = sun_zen.shape
-
-    # --- Sampling params (for coarse angle grid) ---
-    col_step, row_step, col_start, row_start = _parse_sampling_params(root)
-
-    # If missing, infer from tile size and sun grid (best-effort).
-    if (
-        (col_step is None or row_step is None)
-        and tile_size is not None
-        and sun_grid_w
-        and sun_grid_h
-    ):
-        nrows, ncols = tile_size
-        if col_step is None:
-            col_step = (
-                (float(ncols) - 1.0) / (float(sun_grid_w) - 1.0)
-                if sun_grid_w > 1
-                else 1.0
-            )
-        if row_step is None:
-            row_step = (
-                (float(nrows) - 1.0) / (float(sun_grid_h) - 1.0)
-                if sun_grid_h > 1
-                else 1.0
-            )
-
-    if col_step is None or row_step is None:
-        col_step = 1.0
-        row_step = 1.0
-
-    width = int(sun_grid_w) if sun_grid_w is not None else None
-    height = int(sun_grid_h) if sun_grid_h is not None else None
+        height, width = sun_zen.shape
 
     # --- View angles ---
     view_zen: dict[str, list[np.ndarray]] | None = None
@@ -407,16 +404,48 @@ def parse_tile_metadata_angles(
             "Could not determine angle grid dimensions (no sun/view grids parsed)."
         )
 
+    # --- Sampling params (for coarse angle grid) ---
+    col_step, row_step, col_start, row_start = _parse_sampling_params(root)
+
+    # If COL_STEP/ROW_STEP missing, infer in "pixels" from tile_size and coarse grid size, then convert to meters.
+    if (col_step is None or row_step is None) and tile_size is not None:
+        nrows, ncols = tile_size
+        if col_step is None:
+            col_step = (
+                ((float(ncols) - 1.0) / (float(width) - 1.0)) if width > 1 else 1.0
+            )
+        if row_step is None:
+            row_step = (
+                ((float(nrows) - 1.0) / (float(height) - 1.0)) if height > 1 else 1.0
+            )
+
+    if col_step is None:
+        col_step = 1.0
+    if row_step is None:
+        row_step = 1.0
+
+    xdim_m = float(abs(xdim))
+    ydim_m = float(abs(ydim))
+
+    col_step_m = _step_to_meters(float(col_step), xdim_m)
+    row_step_m = _step_to_meters(float(row_step), ydim_m)
+
+    # Starts (usually 0). Apply same heuristic only if non-zero.
+    col_start_m = (
+        _step_to_meters(float(col_start), xdim_m) if float(col_start) != 0.0 else 0.0
+    )
+    row_start_m = (
+        _step_to_meters(float(row_start), ydim_m) if float(row_start) != 0.0 else 0.0
+    )
+
     src_grid = _build_angle_grid(
         crs=crs,
         ulx=ulx,
         uly=uly,
-        xdim=xdim,
-        ydim=ydim,
-        col_step=float(col_step),
-        row_step=float(row_step),
-        col_start=float(col_start),
-        row_start=float(row_start),
+        col_step_m=col_step_m,
+        row_step_m=row_step_m,
+        col_start_m=col_start_m,
+        row_start_m=row_start_m,
         width=int(width),
         height=int(height),
     )
@@ -454,22 +483,22 @@ def _aggregate_detectors(
     zen_grids_deg: list[np.ndarray],
     azi_grids_deg: list[np.ndarray],
     detector_aggregate: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Aggregate per-detector view grids into a single grid.
 
     Returns:
-        zen_deg, zen_sin, zen_cos, (azi_sin, azi_cos) are computed by caller;
-        here we return zen_deg and (azi_sin, azi_cos) building blocks.
+        zen_deg, azi_sin, azi_cos
     """
     if detector_aggregate == "nanmean":
         zen_deg = _mean_zenith_deg_nanmean(zen_grids_deg)
         azi_sin, azi_cos = _mean_azimuth_sin_cos_nanmean(azi_grids_deg)
         return zen_deg, azi_sin, azi_cos
+
     if detector_aggregate == "mosaic":
-        # Requires MSK_DETFOO (or equivalent) to pick the correct detector per pixel.
         raise NotImplementedError(
             "detector_aggregate='mosaic' requires MSK_DETFOO; not implemented yet."
         )
+
     raise ValueError(f"Unknown detector_aggregate: {detector_aggregate!r}")
 
 
@@ -505,17 +534,52 @@ def angles_to_sin_cos_features(
 
     src_grid = angles.src_grid
 
+    # Backward/forward compatible default (in case cfg does not have detector_aggregate yet)
+    detector_aggregate = getattr(cfg, "detector_aggregate", "nanmean")
+
     def _warp(name: str, arr2d: np.ndarray) -> np.ndarray:
-        r = Raster(
-            array=arr2d.astype(np.float32, copy=False),
-            grid=src_grid,
-            nodata=None,
-            band_names=[name],
-        )
-        r2 = resample_raster(r, dst_grid, method="bilinear")
-        out = np.asarray(r2.array, dtype=np.float32)
+        """Resample arr2d to dst_grid while preserving NaN-masked regions.
+
+        Strategy:
+          - build validity mask from finite(src)
+          - resample data bilinear (NaNs filled with 0 to avoid NaN semantics in GDAL)
+          - resample mask nearest
+          - enforce NaN where mask==0
+        """
+        src = np.asarray(arr2d, dtype=np.float32)
+        if src.ndim != 2:
+            raise ValueError(f"Expected 2D array for {name}, got shape={src.shape}")
+
+        src_valid = np.isfinite(src)
+        src_valid_u8 = src_valid.astype(np.uint8)
+
+        # Fill NaNs for the warp itself; validity is enforced by the resampled mask.
+        src_filled = np.where(src_valid, src, 0.0).astype(np.float32, copy=False)
+
+        # 1) data (bilinear)
+        r_data = Raster(array=src_filled, grid=src_grid, nodata=None, band_names=[name])
+        r_data_w = resample_raster(r_data, dst_grid, method="bilinear", dst_nodata=0.0)
+        out = np.asarray(r_data_w.array, dtype=np.float32)
         if out.ndim != 2:
             raise ValueError(f"Resample produced unexpected ndim={out.ndim} for {name}")
+
+        # 2) mask (nearest) -- 0 must be a valid value, so nodata=None
+        r_msk = Raster(
+            array=src_valid_u8, grid=src_grid, nodata=None, band_names=[f"{name}_valid"]
+        )
+        r_msk_w = resample_raster(r_msk, dst_grid, method="nearest", dst_nodata=0)
+        msk = np.asarray(r_msk_w.array)
+        if msk.ndim != 2:
+            raise ValueError(
+                f"Mask resample produced unexpected ndim={msk.ndim} for {name}"
+            )
+
+        if not np.issubdtype(msk.dtype, np.integer):
+            msk = (msk > 0.5).astype(np.uint8)
+        else:
+            msk = msk.astype(np.uint8, copy=False)
+
+        out[msk == 0] = np.nan
         return out
 
     # --- Sun ---
@@ -565,7 +629,7 @@ def angles_to_sin_cos_features(
                 zen_deg, azi_sin_mean, azi_cos_mean = _aggregate_detectors(
                     zen_grids_deg=view_zen[b],
                     azi_grids_deg=view_azi[b],
-                    detector_aggregate=cfg.detector_aggregate,
+                    detector_aggregate=detector_aggregate,
                 )
 
                 if cfg.encode_sin_cos:
@@ -622,7 +686,7 @@ def angles_to_sin_cos_features(
             zen_deg, azi_sin_mean, azi_cos_mean = _aggregate_detectors(
                 zen_grids_deg=zen_arrs,
                 azi_grids_deg=azi_arrs,
-                detector_aggregate=cfg.detector_aggregate,
+                detector_aggregate=detector_aggregate,
             )
 
             if cfg.encode_sin_cos:
@@ -650,6 +714,7 @@ def angles_to_sin_cos_features(
                     [_warp("view_zen_deg", zen_deg), _warp("view_azi_deg", azi_deg)]
                 )
                 names.extend(["view_zen_deg", "view_azi_deg"])
+
         else:
             raise ValueError(f"Unknown view_mode: {cfg.view_mode!r}")
 
