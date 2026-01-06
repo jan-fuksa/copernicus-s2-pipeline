@@ -1,17 +1,61 @@
 from __future__ import annotations
 
+import warnings
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-import xml.etree.ElementTree as ET
+from typing import Iterable, Sequence
 
 import numpy as np
 from affine import Affine
 
-from .cfg import AngleFeatureConfig
+from .cfg import AngleAssetConfig
 from .raster import Raster, RasterGrid
 from .resample import resample_raster
 
 
+"""
+Sentinel-2 tile angles parsing and feature generation (Sun + View).
+
+This module parses native/coarse angle grids from Sentinel-2 L1C tile metadata (MTD_TL.xml)
+and converts them into feature rasters (sin/cos or degrees).
+
+Correct georeferencing for angle grids (based on actual MTD_TL.xml structure)
+---------------------------------------------------------------------------
+In the Sentinel-2 tile metadata:
+
+- `Geometric_Info/Tile_Geocoding/Geoposition` provides tile ULX/ULY (and XDIM/YDIM for pixel grids)
+  at resolutions 10/20/60. ULX/ULY are identical across those resolutions in practice.
+
+- `Geometric_Info/Tile_Angles/Sun_Angles_Grid` and each `Viewing_Incidence_Angles_Grids`
+  provide:
+    - COL_STEP, ROW_STEP  (in CRS units, typically meters; e.g. 5000 m)
+    - Values_List         (H rows x W cols)
+
+Angle grids do NOT carry their own Geoposition. Therefore the angle-grid RasterGrid is reconstructed as:
+
+    transform = Affine(col_step, 0, ULX,
+                       0, -row_step, ULY)
+
+with width/height taken from Values_List shape.
+
+Step-2 usage
+------------
+- `angles_to_sin_cos_features(..., dst_grid=None)` returns features on the native coarse angle grid
+  (typically ~23x23). In Step-2, this is exported as a separate asset `angles.tif` (NOT appended to x.tif).
+- Warping to a dense grid (dst_grid provided) is supported mainly for debugging. Warping uses
+  a validity-mask strategy to avoid interpolation bleeding into invalid (NaN) regions.
+
+View angles and detectors
+-------------------------
+View angles are provided per band and per detector (bandId, detectorId). At most nodes, only one detector is valid;
+near boundaries, two can overlap. We aggregate detectors (default: NaN-aware mean):
+- zenith: nanmean in degrees
+- azimuth: nanmean in sin/cos space (to handle circular wrap-around)
+"""
+
+
+# Sentinel-2 bandId -> band name mapping used in MTD_TL.xml.
 _BAND_ID_TO_NAME: dict[int, str] = {
     0: "B01",
     1: "B02",
@@ -28,698 +72,529 @@ _BAND_ID_TO_NAME: dict[int, str] = {
     12: "B12",
 }
 
+# Stable Sentinel-2 band order.
+_BAND_ORDER: tuple[str, ...] = tuple(_BAND_ID_TO_NAME.values())
+_BAND_ORDER_INDEX: dict[str, int] = {b: i for i, b in enumerate(_BAND_ORDER)}
+
+
+def _band_order_key(b: str) -> int:
+    return _BAND_ORDER_INDEX.get(b, 10_000)
+
 
 @dataclass(frozen=True)
 class AngleFields:
-    """Angle rasters (units: degrees unless stated otherwise)."""
+    """Parsed angle grids on the native (coarse) angle grid.
+
+    All arrays are (H, W) float32 in degrees.
+    View angles are stored per band, and each band has a list of detector grids.
+
+    src_grid:
+      The reconstructed georeferencing for the coarse angle grid.
+    """
 
     src_grid: RasterGrid
-
-    sun_zenith: np.ndarray | None
-    sun_azimuth: np.ndarray | None
-
-    # Per band: list of per-detector grids (values are often NaN outside detector footprint).
-    view_zenith: dict[str, list[np.ndarray]] | None
-    view_azimuth: dict[str, list[np.ndarray]] | None
+    sun_zenith_deg: np.ndarray
+    sun_azimuth_deg: np.ndarray
+    view_zenith_deg_by_band: dict[str, list[np.ndarray]]
+    view_azimuth_deg_by_band: dict[str, list[np.ndarray]]
 
 
-def _local(tag: str) -> str:
-    """Return localname of an XML tag (strip namespace)."""
-    return tag.split("}", 1)[1] if "}" in tag else tag
+def _strip_ns(tag: str) -> str:
+    """Strip '{namespace}' prefix from an XML tag."""
+    if tag.startswith("{"):
+        return tag.split("}", 1)[1]
+    return tag
 
 
-def _find_first(root: ET.Element, name: str) -> ET.Element | None:
-    for el in root.iter():
-        if _local(el.tag) == name:
-            return el
+def _find_first_child(el: ET.Element, name: str) -> ET.Element | None:
+    for c in el:
+        if _strip_ns(c.tag) == name:
+            return c
     return None
 
 
-def _find_all(root: ET.Element, name: str) -> list[ET.Element]:
-    out: list[ET.Element] = []
-    for el in root.iter():
-        if _local(el.tag) == name:
-            out.append(el)
-    return out
+def _find_first_path(el: ET.Element, path: Sequence[str]) -> ET.Element | None:
+    """Follow a simple direct-child path (namespace-agnostic)."""
+    cur: ET.Element | None = el
+    for name in path:
+        if cur is None:
+            return None
+        cur = _find_first_child(cur, name)
+    return cur
 
 
-def _text_float(el: ET.Element | None) -> float | None:
-    if el is None or el.text is None:
-        return None
-    s = el.text.strip()
-    if not s:
-        return None
-    try:
-        return float(s)
-    except Exception:
-        return None
+def _iter_children(el: ET.Element, name: str) -> Iterable[ET.Element]:
+    for c in el:
+        if _strip_ns(c.tag) == name:
+            yield c
 
 
-def _text_int(el: ET.Element | None) -> int | None:
-    v = _text_float(el)
-    if v is None:
-        return None
-    try:
-        return int(v)
-    except Exception:
-        return None
-
-
-def _parse_values_list(values_parent: ET.Element) -> np.ndarray:
-    """Parse <Values_List><VALUES>...</VALUES>...</Values_List> into (H,W) float32 array."""
-    vl = None
-    for ch in list(values_parent):
-        if _local(ch.tag) == "Values_List":
-            vl = ch
-            break
-    if vl is None:
-        vl = values_parent
-
-    rows: list[list[float]] = []
-    for v in list(vl):
-        if _local(v.tag) != "VALUES":
+def _parse_values_list(values_list: ET.Element) -> np.ndarray:
+    """Parse <Values_List><VALUES> ... </VALUES> ...</Values_List> into (H,W) float32."""
+    rows: list[np.ndarray] = []
+    for v in values_list:
+        if _strip_ns(v.tag) != "VALUES":
             continue
         if v.text is None:
             continue
-        parts = v.text.strip().split()
-        if not parts:
-            continue
-        row: list[float] = []
-        for p in parts:
-            # float("NaN") is valid and becomes np.nan
-            try:
-                row.append(float(p))
-            except Exception:
-                row.append(float("nan"))
+        # float('NaN') is supported and preserves NaNs.
+        row = np.asarray([float(x) for x in v.text.strip().split()], dtype=np.float32)
         rows.append(row)
-
     if not rows:
-        raise ValueError("Angle grid: no <VALUES> rows found.")
-
-    w = max(len(r) for r in rows)
-    for r in rows:
-        if len(r) != w:
-            r.extend([float("nan")] * (w - len(r)))
-
-    return np.asarray(rows, dtype=np.float32)
+        raise ValueError("Empty Values_List")
+    return np.stack(rows, axis=0).astype(np.float32, copy=False)
 
 
-def _parse_crs_code(root: ET.Element) -> str | None:
-    el = _find_first(root, "HORIZONTAL_CS_CODE")
+def _parse_float_text(el: ET.Element | None, what: str) -> float:
     if el is None or el.text is None:
+        raise ValueError(f"Missing XML text for {what}")
+    return float(el.text.strip())
+
+
+def _parse_int(x: str | None) -> int | None:
+    if x is None:
         return None
-    s = el.text.strip()
-    return s if s else None
-
-
-def _parse_geoposition(
-    root: ET.Element, resolution_preference: list[int]
-) -> tuple[float, float, float, float, int] | None:
-    """Return (ulx, uly, xdim, ydim, resolution_used) from <Geoposition>."""
-    geopos = _find_all(root, "Geoposition")
-    if not geopos:
+    try:
+        return int(x)
+    except Exception:
         return None
 
-    by_res: dict[int, ET.Element] = {}
-    for g in geopos:
-        res_attr = g.attrib.get("resolution") or g.attrib.get("Resolution")
-        if res_attr is None:
-            continue
-        try:
-            by_res[int(float(res_attr))] = g
-        except Exception:
-            continue
 
-    chosen: ET.Element | None = None
-    chosen_res: int | None = None
+def _read_crs(root: ET.Element) -> str:
+    el = _find_first_path(
+        root, ("Geometric_Info", "Tile_Geocoding", "HORIZONTAL_CS_CODE")
+    )
+    if el is not None and el.text:
+        return el.text.strip()
+    return "unknown"
 
-    for r in resolution_preference:
-        if r in by_res:
-            chosen = by_res[r]
-            chosen_res = r
+
+def _read_ulx_uly_from_tile_geocoding(
+    root: ET.Element, *, prefer_resolution: str = "10"
+) -> tuple[float, float]:
+    """Read ULX/ULY from Geometric_Info/Tile_Geocoding/Geoposition.
+
+    There are typically multiple Geoposition elements with attribute resolution=10/20/60.
+    ULX/ULY are usually identical; we prefer resolution=10 if present.
+    """
+    tg = _find_first_path(root, ("Geometric_Info", "Tile_Geocoding"))
+    if tg is None:
+        raise ValueError("Missing Geometric_Info/Tile_Geocoding")
+
+    geopos_all = [gp for gp in _iter_children(tg, "Geoposition")]
+    if not geopos_all:
+        raise ValueError("Missing Tile_Geocoding/Geoposition")
+
+    gp = None
+    for cand in geopos_all:
+        if cand.attrib.get("resolution") == prefer_resolution:
+            gp = cand
             break
+    if gp is None:
+        gp = geopos_all[0]
 
-    if chosen is None:
-        chosen = geopos[0]
-        res_attr = chosen.attrib.get("resolution") or chosen.attrib.get("Resolution")
-        chosen_res = int(float(res_attr)) if res_attr else 0
-
-    ulx = _text_float(_find_first(chosen, "ULX"))
-    uly = _text_float(_find_first(chosen, "ULY"))
-    xdim = _text_float(_find_first(chosen, "XDIM"))
-    ydim = _text_float(_find_first(chosen, "YDIM"))
-
-    if ulx is None or uly is None or xdim is None or ydim is None:
-        return None
-
-    return float(ulx), float(uly), float(xdim), float(ydim), int(chosen_res)
+    ulx_el = _find_first_child(gp, "ULX")
+    uly_el = _find_first_child(gp, "ULY")
+    ulx = _parse_float_text(ulx_el, "Tile_Geocoding/Geoposition/ULX")
+    uly = _parse_float_text(uly_el, "Tile_Geocoding/Geoposition/ULY")
+    return ulx, uly
 
 
-def _parse_tile_size(root: ET.Element, resolution: int) -> tuple[int, int] | None:
-    """Return (nrows, ncols) from <Size resolution="...">."""
-    sizes = _find_all(root, "Size")
-    for s in sizes:
-        res_attr = s.attrib.get("resolution") or s.attrib.get("Resolution")
-        if res_attr is None:
-            continue
-        try:
-            r = int(float(res_attr))
-        except Exception:
-            continue
-        if r != int(resolution):
-            continue
-        nrows = _text_int(_find_first(s, "NROWS"))
-        ncols = _text_int(_find_first(s, "NCOLS"))
-        if nrows is not None and ncols is not None:
-            return int(nrows), int(ncols)
-    return None
+def _read_angle_steps_from_angle_grid(angle_grid: ET.Element) -> tuple[float, float]:
+    """Read COL_STEP/ROW_STEP from an angle grid container (Zenith preferred)."""
+    zen = _find_first_child(angle_grid, "Zenith")
+    if zen is None:
+        raise ValueError(
+            "Angle grid missing Zenith element (cannot read COL_STEP/ROW_STEP)."
+        )
+    col_step_el = _find_first_child(zen, "COL_STEP")
+    row_step_el = _find_first_child(zen, "ROW_STEP")
+    col_step = _parse_float_text(col_step_el, "COL_STEP")
+    row_step = _parse_float_text(row_step_el, "ROW_STEP")
+    return col_step, row_step
 
 
-def _parse_sampling_params(
-    root: ET.Element,
-) -> tuple[float | None, float | None, float, float]:
-    """Parse COL_STEP, ROW_STEP, COL_START, ROW_START from the XML (best-effort).
-
-    Note:
-      In real Sentinel-2 MTD_TL.xml, COL_STEP/ROW_STEP for angle grids are typically already in meters
-      (e.g. 5000). In synthetic tests they might be in pixels (e.g. 1).
-    """
-    col_step = _text_float(_find_first(root, "COL_STEP"))
-    row_step = _text_float(_find_first(root, "ROW_STEP"))
-    col_start = _text_float(_find_first(root, "COL_START"))
-    row_start = _text_float(_find_first(root, "ROW_START"))
-
-    if col_start is None:
-        col_start = 0.0
-    if row_start is None:
-        row_start = 0.0
-
-    return col_step, row_step, float(col_start), float(row_start)
-
-
-def _step_to_meters(value: float, pixel_size_m: float) -> float:
-    """Convert sampling step value to meters.
-
-    Heuristic:
-      - if value is large (>=1000), treat it as meters (typical: 5000 m)
-      - otherwise treat it as 'pixels' and multiply by pixel size (XDIM/YDIM magnitude)
-    """
-    v = float(value)
-    if abs(v) >= 1000.0:
-        return v
-    return v * float(pixel_size_m)
-
-
-def _build_angle_grid(
+def _reconstruct_angle_grid(
     *,
-    crs: str,
     ulx: float,
     uly: float,
-    col_step_m: float,
-    row_step_m: float,
-    col_start_m: float,
-    row_start_m: float,
-    width: int,
-    height: int,
+    col_step: float,
+    row_step: float,
+    shape_hw: tuple[int, int],
+    crs: str,
 ) -> RasterGrid:
-    """Build coarse angle-grid georeferencing.
+    """Construct RasterGrid for coarse angle grid.
 
-    The angle grid is north-up. ULX/ULY are the tile's upper-left in CRS units (meters in UTM).
-    The coarse grid is defined by steps in meters.
+    COL_STEP/ROW_STEP are positive in the XML; y pixel size should be negative for north-up.
     """
-    xres = float(abs(col_step_m))
-    yres = float(abs(row_step_m))
-
-    x0 = float(ulx) + float(col_start_m)
-    y0 = float(uly) - float(row_start_m)
-
-    transform = Affine(xres, 0.0, x0, 0.0, -yres, y0)
-    res = (xres, yres)
-
+    h, w = shape_hw
+    transform = Affine(col_step, 0.0, ulx, 0.0, -row_step, uly)
     return RasterGrid(
-        crs=str(crs),
+        crs=crs,
         transform=transform,
-        width=int(width),
-        height=int(height),
-        res=res,
+        width=int(w),
+        height=int(h),
+        res=(float(col_step), float(-row_step)),
     )
-
-
-def _parse_band_name(band_id_raw: str | None) -> str:
-    if band_id_raw is None:
-        return "band_unknown"
-    try:
-        return _BAND_ID_TO_NAME.get(int(float(band_id_raw)), f"band_{band_id_raw}")
-    except Exception:
-        return f"band_{band_id_raw}"
-
-
-def _parse_view_grids_from_repeated_elements(root: ET.Element) -> list[ET.Element]:
-    """Return per-detector view elements encoded as repeated Viewing_Incidence_Angles_Grids."""
-    out: list[ET.Element] = []
-    for el in root.iter():
-        if _local(el.tag) != "Viewing_Incidence_Angles_Grids":
-            continue
-        if _find_first(el, "Zenith") is None or _find_first(el, "Azimuth") is None:
-            continue
-        out.append(el)
-    return out
-
-
-def _parse_view_grids_from_container(root: ET.Element) -> list[ET.Element]:
-    """Fallback for schemas that use a container with child Viewing_Incidence_Angles_Grid elements."""
-    container = _find_first(root, "Viewing_Incidence_Angles_Grids")
-    if container is None:
-        container = _find_first(root, "Viewing_Incidence_Angle_List")
-    if container is None:
-        container = _find_first(root, "Viewing_Incidence_Angles_Grid_List")
-    if container is None:
-        return []
-    return [
-        ch
-        for ch in list(container)
-        if _local(ch.tag) == "Viewing_Incidence_Angles_Grid"
-    ]
 
 
 def parse_tile_metadata_angles(
-    tile_metadata_xml: Path, *, cfg: AngleFeatureConfig
+    tile_metadata_xml: Path, *, cfg: AngleAssetConfig
 ) -> AngleFields:
-    """Parse sun/view angles from Sentinel-2 tile metadata XML (MTD_TL.xml).
+    """Parse sun/view angle grids from MTD_TL.xml (native/coarse angle grid).
 
-    Sun angles:
-      - Sun_Angles_Grid (Zenith/Azimuth) as coarse grid.
-
-    View angles:
-      - Prefer repeated elements Viewing_Incidence_Angles_Grids (bandId, detectorId).
-      - Fallback to container Viewing_Incidence_Angles_Grids -> Viewing_Incidence_Angles_Grid.
+    - ULX/ULY are read from Tile_Geocoding/Geoposition.
+    - COL_STEP/ROW_STEP and Values_List shape are read from Tile_Angles/Sun_Angles_Grid.
+    - Viewing_Incidence_Angles_Grids are parsed under Tile_Angles (per band, per detector).
     """
     tile_metadata_xml = Path(tile_metadata_xml)
-    root = ET.fromstring(tile_metadata_xml.read_text(encoding="utf-8"))
+    root = ET.parse(tile_metadata_xml).getroot()
 
-    crs = _parse_crs_code(root) or "UNKNOWN"
-    geo = _parse_geoposition(root, resolution_preference=[10, 20, 60])
-    if geo is None:
-        raise ValueError(
-            "Cannot parse Geoposition (ULX/ULY/XDIM/YDIM) from tile metadata XML."
-        )
+    crs = _read_crs(root)
+    ulx, uly = _read_ulx_uly_from_tile_geocoding(root, prefer_resolution="10")
 
-    ulx, uly, xdim, ydim, geo_res = geo
-    tile_size = _parse_tile_size(root, resolution=geo_res)
+    tile_angles = _find_first_path(root, ("Geometric_Info", "Tile_Angles"))
+    if tile_angles is None:
+        raise ValueError("Missing Geometric_Info/Tile_Angles")
 
     # --- Sun angles ---
-    sun_zen: np.ndarray | None = None
-    sun_azi: np.ndarray | None = None
+    sun = _find_first_child(tile_angles, "Sun_Angles_Grid")
+    if sun is None:
+        raise ValueError("Missing Tile_Angles/Sun_Angles_Grid")
 
-    width: int | None = None
-    height: int | None = None
+    sun_zen_el = _find_first_path(sun, ("Zenith", "Values_List"))
+    sun_azi_el = _find_first_path(sun, ("Azimuth", "Values_List"))
+    if sun_zen_el is None or sun_azi_el is None:
+        raise ValueError("Missing Sun_Angles_Grid Zenith/Azimuth Values_List")
 
-    if cfg.include_sun:
-        sun_grid = _find_first(root, "Sun_Angles_Grid")
-        if sun_grid is None:
-            raise ValueError("Missing Sun_Angles_Grid in tile metadata XML.")
+    sun_zen = _parse_values_list(sun_zen_el)
+    sun_azi = _parse_values_list(sun_azi_el)
 
-        zen_el = _find_first(sun_grid, "Zenith")
-        azi_el = _find_first(sun_grid, "Azimuth")
-        if zen_el is None or azi_el is None:
-            raise ValueError("Sun_Angles_Grid: missing Zenith/Azimuth elements.")
-
-        sun_zen = _parse_values_list(zen_el)
-        sun_azi = _parse_values_list(azi_el)
-        if sun_zen.shape != sun_azi.shape:
-            raise ValueError(
-                f"Sun angles shape mismatch: zenith={sun_zen.shape} azimuth={sun_azi.shape}"
-            )
-
-        height, width = sun_zen.shape
-
-    # --- View angles ---
-    view_zen: dict[str, list[np.ndarray]] | None = None
-    view_azi: dict[str, list[np.ndarray]] | None = None
-
-    if cfg.include_view:
-        view_elems = _parse_view_grids_from_repeated_elements(root)
-        if not view_elems:
-            view_elems = _parse_view_grids_from_container(root)
-
-        if view_elems:
-            view_zen = {}
-            view_azi = {}
-            for g in view_elems:
-                band_id_raw = (
-                    g.attrib.get("bandId")
-                    or g.attrib.get("band_id")
-                    or g.attrib.get("BAND_ID")
-                )
-                if band_id_raw is None:
-                    bid_el = _find_first(g, "BAND_ID")
-                    band_id_raw = (
-                        bid_el.text.strip()
-                        if (bid_el is not None and bid_el.text)
-                        else None
-                    )
-
-                band_name = _parse_band_name(band_id_raw)
-
-                zen_el = _find_first(g, "Zenith")
-                azi_el = _find_first(g, "Azimuth")
-                if zen_el is None or azi_el is None:
-                    continue
-
-                z = _parse_values_list(zen_el)
-                a = _parse_values_list(azi_el)
-                if z.shape != a.shape:
-                    raise ValueError(
-                        f"View angles shape mismatch for {band_name}: zen={z.shape} azi={a.shape}"
-                    )
-
-                if width is None or height is None:
-                    height, width = z.shape
-
-                view_zen.setdefault(band_name, []).append(z)
-                view_azi.setdefault(band_name, []).append(a)
-
-    if width is None or height is None:
-        raise ValueError(
-            "Could not determine angle grid dimensions (no sun/view grids parsed)."
-        )
-
-    # --- Sampling params (for coarse angle grid) ---
-    col_step, row_step, col_start, row_start = _parse_sampling_params(root)
-
-    # If COL_STEP/ROW_STEP missing, infer in "pixels" from tile_size and coarse grid size, then convert to meters.
-    if (col_step is None or row_step is None) and tile_size is not None:
-        nrows, ncols = tile_size
-        if col_step is None:
-            col_step = (
-                ((float(ncols) - 1.0) / (float(width) - 1.0)) if width > 1 else 1.0
-            )
-        if row_step is None:
-            row_step = (
-                ((float(nrows) - 1.0) / (float(height) - 1.0)) if height > 1 else 1.0
-            )
-
-    if col_step is None:
-        col_step = 1.0
-    if row_step is None:
-        row_step = 1.0
-
-    xdim_m = float(abs(xdim))
-    ydim_m = float(abs(ydim))
-
-    col_step_m = _step_to_meters(float(col_step), xdim_m)
-    row_step_m = _step_to_meters(float(row_step), ydim_m)
-
-    # Starts (usually 0). Apply same heuristic only if non-zero.
-    col_start_m = (
-        _step_to_meters(float(col_start), xdim_m) if float(col_start) != 0.0 else 0.0
-    )
-    row_start_m = (
-        _step_to_meters(float(row_start), ydim_m) if float(row_start) != 0.0 else 0.0
-    )
-
-    src_grid = _build_angle_grid(
-        crs=crs,
+    col_step, row_step = _read_angle_steps_from_angle_grid(sun)
+    src_grid = _reconstruct_angle_grid(
         ulx=ulx,
         uly=uly,
-        col_step_m=col_step_m,
-        row_step_m=row_step_m,
-        col_start_m=col_start_m,
-        row_start_m=row_start_m,
-        width=int(width),
-        height=int(height),
+        col_step=col_step,
+        row_step=row_step,
+        shape_hw=(int(sun_zen.shape[0]), int(sun_zen.shape[1])),
+        crs=crs,
     )
+
+    if sun_zen.shape != (src_grid.height, src_grid.width) or sun_azi.shape != (
+        src_grid.height,
+        src_grid.width,
+    ):
+        raise ValueError(
+            "Sun angle grid shape mismatch: "
+            f"zen={sun_zen.shape}, azi={sun_azi.shape}, expected={(src_grid.height, src_grid.width)}"
+        )
+
+    # --- View angles (per band, per detector) ---
+    want_bands = set(cfg.view_bands) if getattr(cfg, "view_bands", ()) else None
+
+    view_zen: dict[str, list[np.ndarray]] = {}
+    view_azi: dict[str, list[np.ndarray]] = {}
+
+    for v in _iter_children(tile_angles, "Viewing_Incidence_Angles_Grids"):
+        band_id_txt = v.attrib.get("bandId")
+        band_id = _parse_int(band_id_txt)
+        if band_id is None or band_id not in _BAND_ID_TO_NAME:
+            continue
+        band_name = _BAND_ID_TO_NAME[band_id]
+
+        if want_bands is not None and band_name not in want_bands:
+            continue
+
+        # Optional consistency check: steps should match sun steps.
+        # (In your XML they do: 5000/5000.)
+        try:
+            v_col_step, v_row_step = _read_angle_steps_from_angle_grid(v)
+            if abs(v_col_step - col_step) > 1e-6 or abs(v_row_step - row_step) > 1e-6:
+                raise ValueError(
+                    f"View grid steps differ from sun steps for band={band_name}: "
+                    f"view=({v_col_step},{v_row_step}) sun=({col_step},{row_step})"
+                )
+        except Exception:
+            # Do not hard-fail on missing steps; Values_List shape check below is the real guard.
+            pass
+
+        zen_el = _find_first_path(v, ("Zenith", "Values_List"))
+        azi_el = _find_first_path(v, ("Azimuth", "Values_List"))
+        if zen_el is None or azi_el is None:
+            continue
+
+        z = _parse_values_list(zen_el)
+        a = _parse_values_list(azi_el)
+
+        if z.shape != (src_grid.height, src_grid.width) or a.shape != (
+            src_grid.height,
+            src_grid.width,
+        ):
+            raise ValueError(
+                f"View grid shape mismatch for band={band_name}: "
+                f"zen={z.shape}, azi={a.shape}, expected={(src_grid.height, src_grid.width)}"
+            )
+
+        view_zen.setdefault(band_name, []).append(z)
+        view_azi.setdefault(band_name, []).append(a)
+
+    view_zen = dict(sorted(view_zen.items(), key=lambda kv: _band_order_key(kv[0])))
+    view_azi = dict(sorted(view_azi.items(), key=lambda kv: _band_order_key(kv[0])))
 
     return AngleFields(
         src_grid=src_grid,
-        sun_zenith=sun_zen,
-        sun_azimuth=sun_azi,
-        view_zenith=view_zen,
-        view_azimuth=view_azi,
+        sun_zenith_deg=sun_zen,
+        sun_azimuth_deg=sun_azi,
+        view_zenith_deg_by_band=view_zen,
+        view_azimuth_deg_by_band=view_azi,
     )
 
 
-def _deg2rad(x: np.ndarray) -> np.ndarray:
-    return np.deg2rad(x.astype(np.float32, copy=False))
+def _finite_counts_across_detectors(detector_grids: Sequence[np.ndarray]) -> np.ndarray:
+    """Internal helper: per-node detector coverage counts across detectors.
+
+    Output:
+      counts: (H, W) int16 where counts[r,c] is number of detectors with finite value at that node.
+    """
+    if not detector_grids:
+        raise ValueError("detector_grids is empty")
+    stack = np.stack(
+        [np.isfinite(np.asarray(g)) for g in detector_grids], axis=0
+    )  # (D,H,W)
+    return np.sum(stack, axis=0).astype(np.int16, copy=False)
 
 
-def _mean_zenith_deg_nanmean(arrs: list[np.ndarray]) -> np.ndarray:
-    stack = np.stack(arrs, axis=0).astype(np.float32, copy=False)
-    return np.nanmean(stack, axis=0).astype(np.float32, copy=False)
-
-
-def _mean_azimuth_sin_cos_nanmean(
-    arrs_deg: list[np.ndarray],
-) -> tuple[np.ndarray, np.ndarray]:
-    # Vector mean to handle wrap-around at 360 degrees, ignoring NaNs.
-    stack = np.stack([_deg2rad(a) for a in arrs_deg], axis=0)
-    s = np.nanmean(np.sin(stack), axis=0).astype(np.float32, copy=False)
-    c = np.nanmean(np.cos(stack), axis=0).astype(np.float32, copy=False)
-    return s, c
-
-
-def _aggregate_detectors(
-    *,
-    zen_grids_deg: list[np.ndarray],
-    azi_grids_deg: list[np.ndarray],
-    detector_aggregate: str,
+def _aggregate_detectors_nanmean(
+    zen_grids_deg: Sequence[np.ndarray],
+    azi_grids_deg: Sequence[np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Aggregate per-detector view grids into a single grid.
+    """Aggregate per-detector view grids into a single per-band grid.
 
     Returns:
-        zen_deg, azi_sin, azi_cos
+      zen_mean_deg: (H,W) float32 degrees
+      azi_sin:      (H,W) float32
+      azi_cos:      (H,W) float32
+
+    Zenith is averaged in degrees (nanmean).
+    Azimuth is averaged in sin/cos space (nanmean) to handle wrap-around.
     """
-    if detector_aggregate == "nanmean":
-        zen_deg = _mean_zenith_deg_nanmean(zen_grids_deg)
-        azi_sin, azi_cos = _mean_azimuth_sin_cos_nanmean(azi_grids_deg)
-        return zen_deg, azi_sin, azi_cos
+    if len(zen_grids_deg) != len(azi_grids_deg):
+        raise ValueError("zen_grids_deg and azi_grids_deg must have the same length.")
 
-    if detector_aggregate == "mosaic":
-        raise NotImplementedError(
-            "detector_aggregate='mosaic' requires MSK_DETFOO; not implemented yet."
-        )
+    z_stack = np.stack(
+        [np.asarray(z, dtype=np.float32) for z in zen_grids_deg], axis=0
+    )  # (D,H,W)
 
-    raise ValueError(f"Unknown detector_aggregate: {detector_aggregate!r}")
+    with warnings.catch_warnings():
+        warnings.simplefilter(
+            "ignore", category=RuntimeWarning
+        )  # mean of empty slice for all-NaN nodes
+        zen_mean = np.nanmean(z_stack, axis=0).astype(np.float32, copy=False)
+
+    sin_stack = []
+    cos_stack = []
+    for a in azi_grids_deg:
+        a = np.asarray(a, dtype=np.float32)
+        rad = np.deg2rad(a)
+        sin_stack.append(np.sin(rad))
+        cos_stack.append(np.cos(rad))
+
+    sin_stack_arr = np.stack(sin_stack, axis=0)
+    cos_stack_arr = np.stack(cos_stack, axis=0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        sin_m = np.nanmean(sin_stack_arr, axis=0).astype(np.float32, copy=False)
+        cos_m = np.nanmean(cos_stack_arr, axis=0).astype(np.float32, copy=False)
+
+    return zen_mean, sin_m, cos_m
 
 
-def _finite_detector_count_map(det_grid: np.ndarray) -> np.ndarray:
-    """Internal diagnostic: number of finite detectors per grid cell.
+def _deg_to_sin_cos(deg: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    rad = np.deg2rad(np.asarray(deg, dtype=np.float32))
+    return np.sin(rad).astype(np.float32, copy=False), np.cos(rad).astype(
+        np.float32, copy=False
+    )
 
-    Args:
-        det_grid: array of shape (D, H, W)
 
-    Returns:
-        count_map: integer array of shape (H, W), values in [0..D]
-    """
-    a = np.asarray(det_grid)
-    if a.ndim != 3:
-        raise ValueError(f"Expected det_grid with shape (D,H,W), got {a.shape}.")
-    count_map = np.sum(np.isfinite(a), axis=0)
-    return count_map.astype(np.uint8, copy=False)
+def _azi_sin_cos_to_deg(sin_a: np.ndarray, cos_a: np.ndarray) -> np.ndarray:
+    rad = np.arctan2(
+        np.asarray(sin_a, dtype=np.float32), np.asarray(cos_a, dtype=np.float32)
+    )
+    deg = np.rad2deg(rad)
+    return np.mod(deg, 360.0).astype(np.float32, copy=False)
 
 
 def angles_to_sin_cos_features(
     *,
     angles: AngleFields,
-    dst_grid: RasterGrid,
-    cfg: AngleFeatureConfig,
+    cfg: AngleAssetConfig,
+    dst_grid: RasterGrid | None,
 ) -> Raster:
-    """Convert angles to feature rasters (sin/cos) and resample to dst_grid.
+    """Convert parsed angles to a feature raster.
 
-    Returns:
-        Raster with array shape (C,H,W), dtype float32, and band_names.
+    Parameters
+    ----------
+    angles:
+      Output from `parse_tile_metadata_angles`.
+    cfg:
+      AngleAssetConfig controlling channel composition and encoding.
+    dst_grid:
+      - None: output on angles.src_grid (native coarse angle grid; recommended for Step-2 angles.tif).
+      - RasterGrid: warp/resample features to this grid (debug/legacy).
+
+    Returns
+    -------
+    Raster:
+      float32 (C,H,W) with nodata=np.nan and band_names describing channels.
     """
-    channels: list[np.ndarray] = []
-    names: list[str] = []
-
     src_grid = angles.src_grid
+    do_warp = dst_grid is not None and dst_grid != src_grid
+    out_grid = dst_grid if do_warp else src_grid
 
-    # Backward/forward compatible default (in case cfg does not have detector_aggregate yet)
-    detector_aggregate = getattr(cfg, "detector_aggregate", "nanmean")
+    encode_sin_cos = bool(getattr(cfg, "encode_sin_cos", True))
 
-    def _warp(name: str, arr2d: np.ndarray) -> np.ndarray:
-        """Resample arr2d to dst_grid while preserving NaN-masked regions.
+    def _warp_2d(name: str, src_2d: np.ndarray, *, method: str) -> np.ndarray:
+        """Warp a 2D float array src_grid -> out_grid with NaN-safe handling."""
+        src_2d = np.asarray(src_2d, dtype=np.float32)
+        if not do_warp:
+            return src_2d
 
-        Strategy:
-          - build validity mask from finite(src)
-          - resample data bilinear (NaNs filled with 0 to avoid NaN semantics in GDAL)
-          - resample mask nearest
-          - enforce NaN where mask==0
-        """
-        src = np.asarray(arr2d, dtype=np.float32)
-        if src.ndim != 2:
-            raise ValueError(f"Expected 2D array for {name}, got shape={src.shape}")
+        valid = np.isfinite(src_2d).astype(np.uint8)
+        val = np.where(np.isfinite(src_2d), src_2d, 0.0).astype(np.float32)
 
-        src_valid = np.isfinite(src)
-        src_valid_u8 = src_valid.astype(np.uint8)
-
-        # Fill NaNs for the warp itself; validity is enforced by the resampled mask.
-        src_filled = np.where(src_valid, src, 0.0).astype(np.float32, copy=False)
-
-        # 1) data (bilinear)
-        r_data = Raster(array=src_filled, grid=src_grid, nodata=None, band_names=[name])
-        r_data_w = resample_raster(r_data, dst_grid, method="bilinear", dst_nodata=0.0)
-        out = np.asarray(r_data_w.array, dtype=np.float32)
-        if out.ndim != 2:
-            raise ValueError(f"Resample produced unexpected ndim={out.ndim} for {name}")
-
-        # 2) mask (nearest) -- 0 must be a valid value, so nodata=None
+        r_val = Raster(array=val, grid=src_grid, nodata=None, band_names=[name])
         r_msk = Raster(
-            array=src_valid_u8, grid=src_grid, nodata=None, band_names=[f"{name}_valid"]
+            array=valid, grid=src_grid, nodata=None, band_names=[f"{name}_valid"]
         )
-        r_msk_w = resample_raster(r_msk, dst_grid, method="nearest", dst_nodata=0)
-        msk = np.asarray(r_msk_w.array)
-        if msk.ndim != 2:
-            raise ValueError(
-                f"Mask resample produced unexpected ndim={msk.ndim} for {name}"
-            )
 
-        if not np.issubdtype(msk.dtype, np.integer):
-            msk = (msk > 0.5).astype(np.uint8)
-        else:
-            msk = msk.astype(np.uint8, copy=False)
+        r_val_w = resample_raster(r_val, out_grid, method=method, dst_nodata=0.0)
+        r_msk_w = resample_raster(r_msk, out_grid, method="nearest", dst_nodata=0.0)
 
-        out[msk == 0] = np.nan
-        return out
+        val_w = np.asarray(r_val_w.array, dtype=np.float32)
+        msk_w = np.asarray(r_msk_w.array, dtype=np.float32)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            out = val_w / msk_w
+        out[msk_w <= 0.0] = np.nan
+        return out.astype(np.float32, copy=False)
+
+    feats: list[np.ndarray] = []
+    names: list[str] = []
 
     # --- Sun ---
     if cfg.include_sun:
-        if angles.sun_zenith is None or angles.sun_azimuth is None:
-            raise ValueError("include_sun=True but sun angles are missing.")
-
-        sun_zen_deg = angles.sun_zenith
-        sun_azi_deg = angles.sun_azimuth
-
-        if cfg.encode_sin_cos:
-            zen_rad = _deg2rad(sun_zen_deg)
-            azi_rad = _deg2rad(sun_azi_deg)
-            sun_zen_sin = np.sin(zen_rad).astype(np.float32, copy=False)
-            sun_zen_cos = np.cos(zen_rad).astype(np.float32, copy=False)
-            sun_azi_sin = np.sin(azi_rad).astype(np.float32, copy=False)
-            sun_azi_cos = np.cos(azi_rad).astype(np.float32, copy=False)
-
-            channels.extend(
-                [_warp("sun_zen_sin", sun_zen_sin), _warp("sun_zen_cos", sun_zen_cos)]
-            )
-            channels.extend(
-                [_warp("sun_azi_sin", sun_azi_sin), _warp("sun_azi_cos", sun_azi_cos)]
-            )
-            names.extend(["sun_zen_sin", "sun_zen_cos", "sun_azi_sin", "sun_azi_cos"])
+        z = angles.sun_zenith_deg
+        a = angles.sun_azimuth_deg
+        if encode_sin_cos:
+            z_sin, z_cos = _deg_to_sin_cos(z)
+            a_sin, a_cos = _deg_to_sin_cos(a)
+            feats += [
+                _warp_2d("sun_zen_sin", z_sin, method="bilinear"),
+                _warp_2d("sun_zen_cos", z_cos, method="bilinear"),
+                _warp_2d("sun_azi_sin", a_sin, method="bilinear"),
+                _warp_2d("sun_azi_cos", a_cos, method="bilinear"),
+            ]
+            names += ["sun_zen_sin", "sun_zen_cos", "sun_azi_sin", "sun_azi_cos"]
         else:
-            channels.extend(
-                [_warp("sun_zen_deg", sun_zen_deg), _warp("sun_azi_deg", sun_azi_deg)]
-            )
-            names.extend(["sun_zen_deg", "sun_azi_deg"])
+            feats += [
+                _warp_2d("sun_zen_deg", z, method="bilinear"),
+                _warp_2d("sun_azi_deg", a, method="bilinear"),
+            ]
+            names += ["sun_zen_deg", "sun_azi_deg"]
 
     # --- View ---
     if cfg.include_view:
-        if angles.view_zenith is None or angles.view_azimuth is None:
-            raise ValueError("include_view=True but view angles are missing.")
+        view_mode = getattr(cfg, "view_mode", "per_band")
+        requested = list(getattr(cfg, "view_bands", ()) or [])
+        parsed_bands = list(angles.view_zenith_deg_by_band.keys())
 
-        view_zen = angles.view_zenith
-        view_azi = angles.view_azimuth
-
-        band_order = list(cfg.view_bands) if cfg.view_bands else sorted(view_zen.keys())
-
-        if cfg.view_mode == "per_band":
-            for b in band_order:
-                if b not in view_zen or b not in view_azi:
-                    continue
-
-                zen_deg, azi_sin_mean, azi_cos_mean = _aggregate_detectors(
-                    zen_grids_deg=view_zen[b],
-                    azi_grids_deg=view_azi[b],
-                    detector_aggregate=detector_aggregate,
-                )
-
-                if cfg.encode_sin_cos:
-                    zen_rad = _deg2rad(zen_deg)
-                    zen_sin = np.sin(zen_rad).astype(np.float32, copy=False)
-                    zen_cos = np.cos(zen_rad).astype(np.float32, copy=False)
-
-                    channels.extend(
-                        [
-                            _warp(f"view_{b}_zen_sin", zen_sin),
-                            _warp(f"view_{b}_zen_cos", zen_cos),
-                        ]
-                    )
-                    channels.extend(
-                        [
-                            _warp(f"view_{b}_azi_sin", azi_sin_mean),
-                            _warp(f"view_{b}_azi_cos", azi_cos_mean),
-                        ]
-                    )
-                    names.extend(
-                        [
-                            f"view_{b}_zen_sin",
-                            f"view_{b}_zen_cos",
-                            f"view_{b}_azi_sin",
-                            f"view_{b}_azi_cos",
-                        ]
-                    )
-                else:
-                    azi_deg = (
-                        np.rad2deg(np.arctan2(azi_sin_mean, azi_cos_mean)) % 360.0
-                    ).astype(np.float32)
-                    channels.extend(
-                        [
-                            _warp(f"view_{b}_zen_deg", zen_deg),
-                            _warp(f"view_{b}_azi_deg", azi_deg),
-                        ]
-                    )
-                    names.extend([f"view_{b}_zen_deg", f"view_{b}_azi_deg"])
-
-        elif cfg.view_mode == "single":
-            zen_arrs: list[np.ndarray] = []
-            azi_arrs: list[np.ndarray] = []
-            for b in band_order:
-                if b in view_zen:
-                    zen_arrs.extend(view_zen[b])
-                if b in view_azi:
-                    azi_arrs.extend(view_azi[b])
-
-            if not zen_arrs or not azi_arrs:
-                raise ValueError(
-                    "view_mode='single' requested but no view angle grids matched the selection."
-                )
-
-            zen_deg, azi_sin_mean, azi_cos_mean = _aggregate_detectors(
-                zen_grids_deg=zen_arrs,
-                azi_grids_deg=azi_arrs,
-                detector_aggregate=detector_aggregate,
-            )
-
-            if cfg.encode_sin_cos:
-                zen_rad = _deg2rad(zen_deg)
-                zen_sin = np.sin(zen_rad).astype(np.float32, copy=False)
-                zen_cos = np.cos(zen_rad).astype(np.float32, copy=False)
-
-                channels.extend(
-                    [_warp("view_zen_sin", zen_sin), _warp("view_zen_cos", zen_cos)]
-                )
-                channels.extend(
-                    [
-                        _warp("view_azi_sin", azi_sin_mean),
-                        _warp("view_azi_cos", azi_cos_mean),
-                    ]
-                )
-                names.extend(
-                    ["view_zen_sin", "view_zen_cos", "view_azi_sin", "view_azi_cos"]
-                )
-            else:
-                azi_deg = (
-                    np.rad2deg(np.arctan2(azi_sin_mean, azi_cos_mean)) % 360.0
-                ).astype(np.float32)
-                channels.extend(
-                    [_warp("view_zen_deg", zen_deg), _warp("view_azi_deg", azi_deg)]
-                )
-                names.extend(["view_zen_deg", "view_azi_deg"])
-
+        if requested:
+            bands = [b for b in requested if b in angles.view_zenith_deg_by_band]
         else:
-            raise ValueError(f"Unknown view_mode: {cfg.view_mode!r}")
+            bands = parsed_bands
 
-    if not channels:
-        raise ValueError("No angle features produced (check AngleFeatureConfig).")
+        if view_mode == "single":
+            per_band = []
+            for b in bands:
+                z_list = angles.view_zenith_deg_by_band[b]
+                a_list = angles.view_azimuth_deg_by_band[b]
+                zen_mean, azi_sin, azi_cos = _aggregate_detectors_nanmean(
+                    z_list, a_list
+                )
+                per_band.append((zen_mean, azi_sin, azi_cos))
 
-    x = np.stack(channels, axis=0).astype(np.float32, copy=False)
-    return Raster(array=x, grid=dst_grid, nodata=None, band_names=names)
+            if per_band:
+                zen_stack = np.stack([p[0] for p in per_band], axis=0)
+                sin_stack = np.stack([p[1] for p in per_band], axis=0)
+                cos_stack = np.stack([p[2] for p in per_band], axis=0)
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    zen_mean = np.nanmean(zen_stack, axis=0).astype(
+                        np.float32, copy=False
+                    )
+                    sin_m = np.nanmean(sin_stack, axis=0).astype(np.float32, copy=False)
+                    cos_m = np.nanmean(cos_stack, axis=0).astype(np.float32, copy=False)
+
+                if encode_sin_cos:
+                    z_sin, z_cos = _deg_to_sin_cos(zen_mean)
+                    feats += [
+                        _warp_2d("view_zen_sin", z_sin, method="bilinear"),
+                        _warp_2d("view_zen_cos", z_cos, method="bilinear"),
+                        _warp_2d("view_azi_sin", sin_m, method="bilinear"),
+                        _warp_2d("view_azi_cos", cos_m, method="bilinear"),
+                    ]
+                    names += [
+                        "view_zen_sin",
+                        "view_zen_cos",
+                        "view_azi_sin",
+                        "view_azi_cos",
+                    ]
+                else:
+                    azi_deg = _azi_sin_cos_to_deg(sin_m, cos_m)
+                    feats += [
+                        _warp_2d("view_zen_deg", zen_mean, method="bilinear"),
+                        _warp_2d("view_azi_deg", azi_deg, method="bilinear"),
+                    ]
+                    names += ["view_zen_deg", "view_azi_deg"]
+
+        elif view_mode == "per_band":
+            for b in bands:
+                z_list = angles.view_zenith_deg_by_band[b]
+                a_list = angles.view_azimuth_deg_by_band[b]
+                zen_mean, azi_sin, azi_cos = _aggregate_detectors_nanmean(
+                    z_list, a_list
+                )
+
+                if encode_sin_cos:
+                    z_sin, z_cos = _deg_to_sin_cos(zen_mean)
+                    feats += [
+                        _warp_2d(f"view_{b}_zen_sin", z_sin, method="bilinear"),
+                        _warp_2d(f"view_{b}_zen_cos", z_cos, method="bilinear"),
+                        _warp_2d(f"view_{b}_azi_sin", azi_sin, method="bilinear"),
+                        _warp_2d(f"view_{b}_azi_cos", azi_cos, method="bilinear"),
+                    ]
+                    names += [
+                        f"view_{b}_zen_sin",
+                        f"view_{b}_zen_cos",
+                        f"view_{b}_azi_sin",
+                        f"view_{b}_azi_cos",
+                    ]
+                else:
+                    azi_deg = _azi_sin_cos_to_deg(azi_sin, azi_cos)
+                    feats += [
+                        _warp_2d(f"view_{b}_zen_deg", zen_mean, method="bilinear"),
+                        _warp_2d(f"view_{b}_azi_deg", azi_deg, method="bilinear"),
+                    ]
+                    names += [f"view_{b}_zen_deg", f"view_{b}_azi_deg"]
+        else:
+            raise ValueError(f"Unsupported view_mode={view_mode!r}")
+
+    if not feats:
+        raise ValueError(
+            "No angle features generated (check cfg.include_sun/include_view and metadata contents)."
+        )
+
+    arr = np.stack(feats, axis=0).astype(np.float32, copy=False)  # (C,H,W)
+    return Raster(array=arr, grid=out_grid, nodata=np.nan, band_names=names)
