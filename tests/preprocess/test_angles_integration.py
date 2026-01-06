@@ -1,96 +1,234 @@
 from __future__ import annotations
 
-import os
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pytest
+from affine import Affine
 
 from s2pipe.preprocess.angles import (
-    parse_tile_metadata_angles,
     angles_to_sin_cos_features,
+    parse_tile_metadata_angles,
 )
-from s2pipe.preprocess.cfg import AngleFeatureConfig
-from s2pipe.preprocess.inputs import load_download_index, select_assets
-from s2pipe.preprocess.raster import grid_from_reference_raster
+from s2pipe.preprocess.cfg import AngleAssetConfig
 
 
-def _testdata_root() -> Path:
-    env = os.environ.get("S2PIPE_TESTDATA_DIR")
-    if env:
-        return Path(env).expanduser().resolve()
-    return (
-        Path(__file__).resolve().parents[1] / "fixtures" / "step1_single_tile"
-    ).resolve()
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _fixture_root() -> Path:
+    root = _repo_root()
+    p = root / "tests" / "fixtures" / "step1_single_tile"
+    if not p.exists():
+        pytest.skip(f"Fixture directory not found: {p}")
+    return p
+
+
+def _find_mtd_tl_xml() -> Path:
+    base = _fixture_root()
+    hits = sorted(base.rglob("MTD_TL.xml"))
+    if not hits:
+        pytest.skip(f"MTD_TL.xml not found under fixture root: {base}")
+    return hits[0]
+
+
+def _strip_ns(tag: str) -> str:
+    return tag.split("}", 1)[1] if tag.startswith("{") else tag
+
+
+def _find_first_path(el: ET.Element, path: tuple[str, ...]) -> ET.Element | None:
+    cur = el
+    for name in path:
+        nxt = None
+        for c in cur:
+            if _strip_ns(c.tag) == name:
+                nxt = c
+                break
+        if nxt is None:
+            return None
+        cur = nxt
+    return cur
+
+
+def _iter_children(el: ET.Element, name: str):
+    for c in el:
+        if _strip_ns(c.tag) == name:
+            yield c
+
+
+def _read_expected_ulx_uly(
+    root: ET.Element, prefer_resolution: str = "10"
+) -> tuple[float, float]:
+    tg = _find_first_path(root, ("Geometric_Info", "Tile_Geocoding"))
+    assert tg is not None, "Missing Geometric_Info/Tile_Geocoding"
+
+    geopos = list(_iter_children(tg, "Geoposition"))
+    assert geopos, "Missing Tile_Geocoding/Geoposition"
+
+    gp = None
+    for cand in geopos:
+        if cand.attrib.get("resolution") == prefer_resolution:
+            gp = cand
+            break
+    if gp is None:
+        gp = geopos[0]
+
+    ulx_el = _find_first_path(gp, ("ULX",))
+    uly_el = _find_first_path(gp, ("ULY",))
+    assert ulx_el is not None and ulx_el.text, "Missing ULX"
+    assert uly_el is not None and uly_el.text, "Missing ULY"
+    return float(ulx_el.text.strip()), float(uly_el.text.strip())
+
+
+def _read_expected_steps_and_shape_from_sun(
+    root: ET.Element,
+) -> tuple[float, float, tuple[int, int]]:
+    tile_angles = _find_first_path(root, ("Geometric_Info", "Tile_Angles"))
+    assert tile_angles is not None, "Missing Geometric_Info/Tile_Angles"
+
+    sun = None
+    for c in tile_angles:
+        if _strip_ns(c.tag) == "Sun_Angles_Grid":
+            sun = c
+            break
+    assert sun is not None, "Missing Sun_Angles_Grid"
+
+    zen = _find_first_path(sun, ("Zenith",))
+    assert zen is not None, "Missing Sun_Angles_Grid/Zenith"
+
+    col_step_el = _find_first_path(zen, ("COL_STEP",))
+    row_step_el = _find_first_path(zen, ("ROW_STEP",))
+    assert col_step_el is not None and col_step_el.text, "Missing COL_STEP"
+    assert row_step_el is not None and row_step_el.text, "Missing ROW_STEP"
+
+    col_step = float(col_step_el.text.strip())
+    row_step = float(row_step_el.text.strip())
+
+    vl = _find_first_path(zen, ("Values_List",))
+    assert vl is not None, "Missing Sun_Angles_Grid/Zenith/Values_List"
+
+    rows = [r for r in vl if _strip_ns(r.tag) == "VALUES" and (r.text or "").strip()]
+    assert rows, "Empty Values_List"
+
+    h = len(rows)
+    w = len(rows[0].text.strip().split())
+    return col_step, row_step, (h, w)
 
 
 @pytest.mark.integration
-def test_angles_real_tile_to_scl20m_grid():
-    root = _testdata_root()
-    index_path = root / "meta" / "manifest" / "index.json"
-    if not index_path.exists():
-        pytest.skip(f"Missing test data index.json at: {index_path}")
+def test_parse_tile_metadata_angles_reconstructs_grid_correctly_from_tile_geocoding_and_steps() -> (
+    None
+):
+    xml_path = _find_mtd_tl_xml()
+    root = ET.parse(xml_path).getroot()
 
-    index = load_download_index(index_path)
-    if not index.pairs:
-        pytest.skip("No pairs in Step-1 index.json")
+    ulx, uly = _read_expected_ulx_uly(root, prefer_resolution="10")
+    col_step, row_step, (h, w) = _read_expected_steps_and_shape_from_sun(root)
 
-    for pair in index.pairs:
-        assets = select_assets(
-            pair,
-            index,
-            l1c_bands=(),
-            need_l1c_tile_metadata=True,
-            need_l2a_tile_metadata=False,
-            need_scl_20m=True,
-            require_present=True,
-        )
+    cfg = AngleAssetConfig(
+        enabled=True,
+        include_sun=True,
+        include_view=True,
+        encode="sin_cos",
+        view_mode="per_band",
+        view_bands=("B02",),
+        detector_aggregate="nanmean",
+    )
 
-        if assets.l1c_tile_metadata is None or not assets.l1c_tile_metadata.exists():
-            pytest.skip("Missing L1C MTD_TL.xml in fixtures.")
-        if assets.scl_20m is None or not assets.scl_20m.exists():
-            pytest.skip("Missing SCL_20m in fixtures.")
+    angles = parse_tile_metadata_angles(xml_path, cfg=cfg)
 
-        dst_grid = grid_from_reference_raster(assets.scl_20m)
+    # expected transform: Affine(col_step, 0, ULX, 0, -row_step, ULY)
+    exp = Affine(col_step, 0.0, ulx, 0.0, -row_step, uly)
+    got = angles.src_grid.transform
 
-        cfg = AngleFeatureConfig(
-            include_sun=True,
-            include_view=True,
-            encode_sin_cos=True,
-            view_mode="single",
-            view_bands=("B02",),
-        )
+    assert got.a == pytest.approx(exp.a)
+    assert got.b == pytest.approx(exp.b)
+    assert got.c == pytest.approx(exp.c)
+    assert got.d == pytest.approx(exp.d)
+    assert got.e == pytest.approx(exp.e)
+    assert got.f == pytest.approx(exp.f)
 
-        ang = parse_tile_metadata_angles(assets.l1c_tile_metadata, cfg=cfg)
+    assert angles.src_grid.width == w
+    assert angles.src_grid.height == h
 
-        # Preventing previous error (×10): we typically expect coarse grid step in kilometers.
-        assert 1000.0 <= ang.src_grid.res[0] <= 20000.0
-        assert 1000.0 <= ang.src_grid.res[1] <= 20000.0
+    # The provided XML should be 23x23 (coarse angle grid).
+    assert (h, w) == (23, 23)
+    assert angles.sun_zenith_deg.shape == (23, 23)
+    assert angles.sun_azimuth_deg.shape == (23, 23)
 
-        feat = angles_to_sin_cos_features(angles=ang, dst_grid=dst_grid, cfg=cfg)
-        x = np.asarray(feat.array)
 
-        assert x.dtype == np.float32
-        assert x.shape[0] == 8  # 4 sun + 4 view (single)
-        assert x.shape[1] == dst_grid.height
-        assert x.shape[2] == dst_grid.width
+@pytest.mark.integration
+def test_parse_tile_metadata_angles_loads_view_grids_for_b02_and_shapes_match() -> None:
+    xml_path = _find_mtd_tl_xml()
 
-        assert feat.band_names == [
-            "sun_zen_sin",
-            "sun_zen_cos",
-            "sun_azi_sin",
-            "sun_azi_cos",
-            "view_zen_sin",
-            "view_zen_cos",
-            "view_azi_sin",
-            "view_azi_cos",
-        ]
+    cfg = AngleAssetConfig(
+        enabled=True,
+        include_sun=True,
+        include_view=True,
+        encode="sin_cos",
+        view_mode="per_band",
+        view_bands=("B02",),
+        detector_aggregate="nanmean",
+    )
 
-        finite = np.isfinite(x)
-        assert (
-            int(finite.sum()) > 0
-        )  # there may be a lot of NaN for low coverage_ration, but not all
+    angles = parse_tile_metadata_angles(xml_path, cfg=cfg)
 
-        # sin/cos in [-1, 1] for finite pixels
-        absmax = float(np.max(np.abs(x[finite])))
-        assert absmax <= 1.0001
+    assert "B02" in angles.view_zenith_deg_by_band
+    assert "B02" in angles.view_azimuth_deg_by_band
+
+    z_list = angles.view_zenith_deg_by_band["B02"]
+    a_list = angles.view_azimuth_deg_by_band["B02"]
+
+    assert isinstance(z_list, list) and len(z_list) > 0
+    assert isinstance(a_list, list) and len(a_list) == len(z_list)
+
+    H, W = angles.src_grid.height, angles.src_grid.width
+    for z in z_list:
+        assert z.shape == (H, W)
+    for a in a_list:
+        assert a.shape == (H, W)
+
+
+@pytest.mark.integration
+def test_angles_to_sin_cos_features_returns_expected_channels_on_native_coarse_grid() -> (
+    None
+):
+    xml_path = _find_mtd_tl_xml()
+
+    cfg = AngleAssetConfig(
+        enabled=True,
+        include_sun=True,
+        include_view=True,
+        encode="sin_cos",
+        view_mode="per_band",
+        view_bands=("B02", "B03"),  # deterministic: 4 + 4*B = 12 channels
+        detector_aggregate="nanmean",
+    )
+
+    angles = parse_tile_metadata_angles(xml_path, cfg=cfg)
+    r = angles_to_sin_cos_features(angles=angles, cfg=cfg, dst_grid=None)
+
+    arr = r.to_chw()
+    assert arr.dtype == np.float32
+    assert arr.shape == (12, 23, 23)
+
+    assert r.band_names is not None
+    assert r.band_names == [
+        "sun_zen_sin",
+        "sun_zen_cos",
+        "sun_azi_sin",
+        "sun_azi_cos",
+        "view_B02_zen_sin",
+        "view_B02_zen_cos",
+        "view_B02_azi_sin",
+        "view_B02_azi_cos",
+        "view_B03_zen_sin",
+        "view_B03_zen_cos",
+        "view_B03_azi_sin",
+        "view_B03_azi_cos",
+    ]
+
+    # nodata is NaN
+    assert r.nodata is not None and np.isnan(float(r.nodata))
