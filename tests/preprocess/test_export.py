@@ -1,133 +1,276 @@
+from __future__ import annotations
+
 import json
+import re
 from pathlib import Path
 
 import numpy as np
-from rasterio.transform import from_origin
-import rasterio
+import pytest
+from affine import Affine
 
 from s2pipe.preprocess.export import (
-    write_processed_sample,
+    ProcessedSample,
+    _append_jsonl,
+    _atomic_write_json,
+    _deep_merge,
+    _grid_to_meta,
+    _raster_asset_info,
+    _safe_sensing_for_path,
     update_preprocess_manifest,
     update_step2_index,
+    write_processed_sample,
 )
 from s2pipe.preprocess.raster import Raster, RasterGrid
 
 
-def _dummy_grid(width: int, height: int, res: float = 20.0) -> RasterGrid:
-    transform = from_origin(0.0, float(height) * res, res, res)
+ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+
+def _mk_grid() -> RasterGrid:
     return RasterGrid(
         crs="EPSG:32633",
-        transform=transform,
-        width=width,
-        height=height,
-        res=(float(res), float(res)),
+        transform=Affine(10.0, 0.0, 100.0, 0.0, -10.0, 200.0),
+        width=4,
+        height=3,
+        res=(10.0, -10.0),
     )
 
 
-def test_write_processed_sample_writes_x_y_and_meta(tmp_path: Path):
-    out_dir = tmp_path / "dataset"
-    grid = _dummy_grid(16, 12, 20.0)
+def test_safe_sensing_for_path_sanitizes_colons_slashes_spaces():
+    assert _safe_sensing_for_path("2020-01-01T12:34:56Z") == "2020-01-01T123456Z"
+    assert _safe_sensing_for_path("2020/01/01 12:34:56") == "2020_01_01_123456"
 
-    x = Raster(
-        array=np.random.rand(3, 12, 16).astype(np.float32),
-        grid=grid,
-        nodata=None,
-        band_names=["b1", "b2", "b3"],
-    )
-    y = Raster(
-        array=np.random.randint(0, 5, size=(12, 16), dtype=np.uint8),
-        grid=grid,
-        nodata=255,
-        band_names=["label"],
-    )
 
-    meta = {
-        "spatial": {
-            "footprint_geojson": {
-                "type": "Polygon",
-                "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
-            }
-        },
-        "quality": {"cloud_cover": {"value": 12.3}},
-        "labels": {"ignore_index": 255, "valid_pixel_ratio": 0.5},
-    }
+def test_atomic_write_json_creates_parent_and_writes_newline(tmp_path: Path):
+    p = tmp_path / "a" / "b" / "meta.json"
+    obj = {"a": 1, "b": {"c": 2}}
 
-    sample = write_processed_sample(
-        out_dir,
-        tile_id="33UWQ",
-        sensing_start_utc="2025-12-01T10:12:33Z",
+    _atomic_write_json(p, obj)
+
+    raw = p.read_text(encoding="utf-8")
+    assert raw.endswith("\n")
+    assert json.loads(raw) == obj
+
+
+def test_append_jsonl_appends_records(tmp_path: Path):
+    p = tmp_path / "m.jsonl"
+    _append_jsonl(p, {"i": 1})
+    _append_jsonl(p, {"i": 2, "x": "y"})
+
+    lines = p.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(ln) for ln in lines] == [{"i": 1}, {"i": 2, "x": "y"}]
+
+
+def test_deep_merge_recursive_dicts():
+    a = {"a": 1, "b": {"x": 1, "y": 2}}
+    b = {"b": {"y": 999, "z": 3}, "c": 4}
+    out = _deep_merge(a, b)
+    assert out == {"a": 1, "b": {"x": 1, "y": 999, "z": 3}, "c": 4}
+
+
+def test_grid_to_meta_serializes_affine_and_res():
+    g = _mk_grid()
+    meta = _grid_to_meta(g)
+
+    assert meta["crs"] == "EPSG:32633"
+    assert meta["width"] == 4
+    assert meta["height"] == 3
+    assert meta["res"] == [10.0, -10.0]
+
+    # Affine is serialized to the 6-parameter GDAL-ish form (a,b,c,d,e,f)
+    assert meta["transform"] == [10.0, 0.0, 100.0, 0.0, -10.0, 200.0]
+
+
+def test_raster_asset_info_includes_dtype_shape_grid_nodata_and_band_names():
+    g = _mk_grid()
+    arr = np.arange(g.height * g.width, dtype=np.uint16).reshape(g.height, g.width)
+    r = Raster(array=arr, grid=g, nodata=0, band_names=["b1"])
+
+    info = _raster_asset_info(r)
+
+    assert info["dtype"] == "uint16"
+    assert info["shape_chw"] == [1, g.height, g.width]
+    assert info["nodata"] == 0
+    assert info["band_names"] == ["b1"]
+    assert info["grid"]["crs"] == g.crs
+
+
+def test_write_processed_sample_writes_layout_and_meta_and_extra_assets(tmp_path: Path):
+    g = _mk_grid()
+
+    x_arr = np.arange(g.height * g.width, dtype=np.uint16).reshape(g.height, g.width)
+    y_arr = (x_arr % 3).astype(np.uint8)
+    ang_arr = np.stack(
+        [x_arr.astype(np.float32), (x_arr + 1).astype(np.float32)], axis=0
+    )  # (C,H,W)
+
+    x = Raster(array=x_arr, grid=g, nodata=0, band_names=["x"])
+    y = Raster(array=y_arr, grid=g, nodata=255, band_names=["y"])
+    angles = Raster(array=ang_arr, grid=g, nodata=None, band_names=["a0", "a1"])
+
+    sensing = "2020-01-01T12:34:56Z"
+    ps = write_processed_sample(
+        tmp_path,
+        tile_id="33UVP",
+        sensing_start_utc=sensing,
         x=x,
         y=y,
-        meta=meta,
+        meta_extra={
+            "schema": "should_not_override",
+            "paths": {"x": "should_not_override"},
+            "extra": {"nested": 1},
+        },
+        extra_assets={"angles": angles},
+        extra_asset_filenames={"angles": "angles.tif"},
     )
 
-    assert sample.x_path.exists()
-    assert sample.y_path.exists()
-    assert sample.meta_path.exists()
+    assert isinstance(ps, ProcessedSample)
+    assert ps.tile_id == "33UVP"
+    assert ps.sensing_start_utc == sensing
 
-    with rasterio.open(sample.x_path) as ds:
-        assert ds.count == 3
-        assert ds.width == 16
-        assert ds.height == 12
-        assert ds.crs.to_string() == "EPSG:32633"
+    sensing_safe = _safe_sensing_for_path(sensing)
+    expected_dir = tmp_path / "processed" / "tile=33UVP" / f"sensing={sensing_safe}"
+    assert ps.sample_dir == expected_dir
 
-    with rasterio.open(sample.y_path) as ds:
+    # Files exist
+    assert ps.asset_paths["x"].exists()
+    assert ps.asset_paths["y"].exists()
+    assert ps.asset_paths["meta"].exists()
+    assert ps.asset_paths["angles"].exists()
+    assert ps.asset_paths["angles"].name == "angles.tif"
+
+    # meta.json content
+    meta = json.loads((expected_dir / "meta.json").read_text(encoding="utf-8"))
+    assert meta["schema"] == "s2pipe.step2.sample_meta.v1"
+    assert ISO_Z_RE.match(meta["created_utc"]) is not None
+    assert isinstance(meta.get("s2pipe_version"), str)
+    assert meta["key"] == {"tile_id": "33UVP", "sensing_start_utc": sensing}
+
+    # Paths are relative to sample_dir
+    assert meta["paths"]["x"] == "x.tif"
+    assert meta["paths"]["y"] == "y.tif"
+    assert meta["paths"]["meta"] == "meta.json"
+    assert meta["paths"]["angles"] == "angles.tif"
+
+    # Asset info present for x/y/angles
+    assert meta["assets"]["x"]["shape_chw"] == [1, g.height, g.width]
+    assert meta["assets"]["y"]["shape_chw"] == [1, g.height, g.width]
+    assert meta["assets"]["angles"]["shape_chw"] == [2, g.height, g.width]
+
+    # meta_extra merged, but protected keys are not overridden
+    assert meta["extra"]["nested"] == 1
+
+    # Basic GeoTIFF smoke-check (no need to test raster.py in depth)
+    import rasterio
+
+    with rasterio.open(ps.asset_paths["x"]) as ds:
         assert ds.count == 1
-        assert ds.width == 16
-        assert ds.height == 12
+        assert ds.width == g.width
+        assert ds.height == g.height
+        assert ds.crs is not None and ds.crs.to_string() == g.crs
 
-    m = json.loads(sample.meta_path.read_text(encoding="utf-8"))
-    assert m["tile_id"] == "33UWQ"
-    assert m["sensing_start_utc"] == "2025-12-01T10:12:33Z"
-    assert "s2pipe_version" in m
-    assert "spatial" in m and "target_grid" in m["spatial"]
-    assert m["spatial"]["footprint_geojson"]["type"] == "Polygon"
+    with rasterio.open(ps.asset_paths["angles"]) as ds:
+        assert ds.count == 2
 
 
-def test_update_run_manifest_and_global_index(tmp_path: Path):
-    out_dir = tmp_path / "dataset"
-    grid = _dummy_grid(8, 6, 20.0)
+def test_write_processed_sample_rejects_reserved_extra_asset_names(tmp_path: Path):
+    g = _mk_grid()
+    x = Raster(array=np.zeros((g.height, g.width), dtype=np.uint8), grid=g)
+    y = Raster(array=np.zeros((g.height, g.width), dtype=np.uint8), grid=g)
 
-    def mk_sample(ts: str) -> tuple[Path, Path, Path]:
-        x = Raster(
-            array=np.random.rand(1, 6, 8).astype(np.float32),
-            grid=grid,
-            nodata=None,
-            band_names=["b1"],
+    with pytest.raises(ValueError, match=r"reserved names"):
+        write_processed_sample(
+            tmp_path,
+            tile_id="33UVP",
+            sensing_start_utc="2020-01-01T00:00:00Z",
+            x=x,
+            y=y,
+            extra_assets={"x": x},
         )
-        y = Raster(
-            array=np.zeros((6, 8), dtype=np.uint8),
-            grid=grid,
-            nodata=255,
-            band_names=["label"],
-        )
-        meta = {"labels": {"ignore_index": 255}}
-        s = write_processed_sample(
-            out_dir, tile_id="33UWQ", sensing_start_utc=ts, x=x, y=y, meta=meta
-        )
-        return s
 
-    s1 = mk_sample("2025-12-01T10:12:33Z")
-    s2 = mk_sample("2025-12-02T10:12:33Z")
 
-    manifest_dir = out_dir / "processed" / "manifest"
-    run_manifest = manifest_dir / "run_test.json"
-    step2_index = manifest_dir / "index.json"
+def test_update_preprocess_manifest_appends_jsonl(tmp_path: Path):
+    p = tmp_path / "run_manifest.jsonl"
+    update_preprocess_manifest(p, record={"a": 1})
+    update_preprocess_manifest(p, record={"b": 2})
 
-    update_preprocess_manifest(run_manifest, sample=s1, meta={"run_id": "test"})
-    update_preprocess_manifest(run_manifest, sample=s2, meta={"run_id": "test"})
-    update_step2_index(step2_index, sample=s1, dataset_meta={"target_res_m": 20})
-    update_step2_index(step2_index, sample=s2, dataset_meta={"target_res_m": 20})
+    lines = p.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(ln) for ln in lines] == [{"a": 1}, {"b": 2}]
 
-    run_doc = json.loads(run_manifest.read_text(encoding="utf-8"))
-    assert len(run_doc["samples"]) == 2
 
-    idx_doc = json.loads(step2_index.read_text(encoding="utf-8"))
-    assert "dataset" in idx_doc
-    assert idx_doc["dataset"]["target_res_m"] == 20
-    assert len(idx_doc["samples"]) == 2
+def test_update_step2_index_creates_and_upserts_and_merges_output(tmp_path: Path):
+    p = tmp_path / "index.json"
+    rec1 = {
+        "key": {"tile_id": "33UVP", "sensing_start_utc": "2020-01-01T00:00:00Z"},
+        "sample": {"path": "processed/tile=33UVP/..."},
+    }
 
-    # Paths in index should be relative to out_dir (not absolute)
-    for rec in idx_doc["samples"]:
-        assert not str(rec["paths"]["x"]).startswith(str(out_dir))
-        assert rec["paths"]["x"].startswith("processed/")
+    update_step2_index(p, sample_rec=rec1)
+    doc = json.loads(p.read_text(encoding="utf-8"))
+
+    assert doc["schema"] == "s2pipe.step2.index.v1"
+    assert ISO_Z_RE.match(doc["created_utc"]) is not None
+    assert ISO_Z_RE.match(doc["updated_utc"]) is not None
+    assert doc["samples"] == [rec1]
+
+    # Upsert replaces record with same (tile_id, sensing_start_utc)
+    rec2 = {
+        "key": {"tile_id": "33UVP", "sensing_start_utc": "2020-01-01T00:00:00Z"},
+        "sample": {"path": "processed/tile=33UVP/NEW"},
+        "extra": 123,
+    }
+    update_step2_index(p, sample_rec=rec2, output={"n_samples": 1})
+    doc2 = json.loads(p.read_text(encoding="utf-8"))
+
+    assert doc2["samples"] == [rec2]
+    assert doc2["output"]["n_samples"] == 1
+    assert ISO_Z_RE.match(doc2["updated_utc"]) is not None
+
+    # New key appends
+    rec3 = {
+        "key": {"tile_id": "33UVP", "sensing_start_utc": "2020-01-02T00:00:00Z"},
+        "sample": {"path": "processed/tile=33UVP/SECOND"},
+    }
+    update_step2_index(p, sample_rec=rec3)
+    doc3 = json.loads(p.read_text(encoding="utf-8"))
+    assert len(doc3["samples"]) == 2
+    assert rec2 in doc3["samples"]
+    assert rec3 in doc3["samples"]
+
+
+def test_update_step2_index_handles_malformed_samples_and_output(tmp_path: Path):
+    p = tmp_path / "index.json"
+
+    # Malformed doc: samples is not a list; output is not a dict
+    p.write_text(
+        json.dumps(
+            {
+                "schema": "s2pipe.step2.index.v1",
+                "created_utc": "2020-01-01T00:00:00Z",
+                "updated_utc": "2020-01-01T00:00:00Z",
+                "output": "bad",
+                "samples": {"bad": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rec = {
+        "key": {"tile_id": "33UVP", "sensing_start_utc": "2020-01-01T00:00:00Z"},
+        "ok": True,
+    }
+    update_step2_index(p, sample_rec=rec, output={"ok": True})
+    doc = json.loads(p.read_text(encoding="utf-8"))
+
+    assert doc["samples"] == [rec]
+    assert doc["output"] == {"ok": True}
+
+
+def test_update_step2_index_validates_key(tmp_path: Path):
+    p = tmp_path / "index.json"
+
+    with pytest.raises(ValueError, match=r"sample_rec\.key must be a dict"):
+        update_step2_index(p, sample_rec={"key": "nope"})
+
+    with pytest.raises(ValueError, match=r"must contain tile_id"):
+        update_step2_index(p, sample_rec={"key": {"tile_id": "33UVP"}})
