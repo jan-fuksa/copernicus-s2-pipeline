@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import traceback
 from dataclasses import dataclass
@@ -10,8 +9,15 @@ from typing import Any
 
 import numpy as np
 
+from .angles import angles_to_sin_cos_features, parse_tile_metadata_angles
 from .cfg import PreprocessConfig
-from .inputs import DownloadIndex, IndexPair, load_download_index, select_assets
+from .export import (
+    update_preprocess_manifest,
+    update_step2_index,
+    write_processed_sample,
+)
+from .inputs import load_download_index, select_assets
+from .labels import scl_to_labels_with_meta
 from .raster import (
     Raster,
     RasterGrid,
@@ -20,9 +26,6 @@ from .raster import (
     stack_rasters,
 )
 from .resample import resample_raster
-from .angles import parse_tile_metadata_angles, angles_to_sin_cos_features
-from .labels import scl_to_labels_with_meta
-from .export import write_processed_sample
 
 log = logging.getLogger(__name__)
 
@@ -30,12 +33,11 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PreprocessResult:
     run_id: str
-    run_manifest_path: Path | None
-    stats_path: Path | None
+    run_manifest_path: Path
+    step2_index_path: Path
     processed_count: int
     failed_count: int = 0
     skipped_count: int = 0
-    step2_index_path: Path | None = None
 
 
 def _utc_now_iso() -> str:
@@ -48,13 +50,7 @@ def _utc_now_iso() -> str:
 
 
 def _default_run_id() -> str:
-    # e.g. 20260105T142533Z
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _safe_sensing_id(s: str) -> str:
-    # Avoid ":" in filenames. Keep it deterministic.
-    return s.replace(":", "").replace("/", "_")
 
 
 def _relpath_str(root: Path, p: Path) -> str:
@@ -64,129 +60,32 @@ def _relpath_str(root: Path, p: Path) -> str:
         return str(Path(p).resolve())
 
 
-def _ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _choose_target_grid_ref_path(assets: Any, cfg: PreprocessConfig) -> Path:
+    ref = (cfg.target_grid_ref or "").strip()
+    if ref.lower() == "scl_20m":
+        if assets.scl_20m is None:
+            raise FileNotFoundError("target_grid_ref='scl_20m' but SCL_20m is missing.")
+        return Path(assets.scl_20m)
+
+    if ref not in assets.l1c_bands:
+        raise KeyError(
+            f"target_grid_ref={ref!r} not found among selected L1C bands: {sorted(assets.l1c_bands.keys())}"
+        )
+    return Path(assets.l1c_bands[ref])
 
 
-def _load_step2_index(path: Path) -> dict[str, Any]:
-    if not path.exists():
-        return {
-            "schema": "s2pipe.step2.index.v1",
-            "created_utc": _utc_now_iso(),
-            "output": {},
-            "samples": [],
-        }
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def _write_json_atomic(path: Path, obj: dict[str, Any]) -> None:
-    _ensure_parent(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-    tmp.replace(path)
-
-
-def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    _ensure_parent(path)
-    line = json.dumps(record, ensure_ascii=False)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(line + "\n")
-
-
-def _build_target_grid(
-    *,
-    pair: IndexPair,
-    assets: Any,
-    cfg: PreprocessConfig,
-) -> RasterGrid:
-    """Choose a target grid, preferring a reference raster whose resolution matches cfg.target_res_m.
-
-    Preference order:
-      1) If target_res_m == 20 and SCL_20m exists -> use SCL grid (common choice for SCL-driven training).
-      2) Otherwise, try to find a reference band among selected L1C bands that matches target_res_m.
-      3) Fallback: use the first selected L1C band.
-    """
-    target_res = int(getattr(cfg, "target_res_m", 10))
-
-    # 1) Prefer SCL for 20m
-    if target_res == 20 and getattr(assets, "scl_20m", None) is not None:
-        return grid_from_reference_raster(assets.scl_20m)
-
-    # 2) Try to pick a band whose native res matches the target
-    band_paths: dict[str, Path] = getattr(assets, "l1c_bands", {}) or {}
-    for b, p in band_paths.items():
-        try:
-            g = grid_from_reference_raster(p)
-            if int(round(g.res_m)) == target_res:
-                return g
-        except Exception:
-            continue
-
-    # 3) Fallback to first band (deterministic order)
-    if band_paths:
-        b0 = sorted(band_paths.keys())[0]
-        return grid_from_reference_raster(band_paths[b0])
-
-    raise ValueError(
-        f"Cannot determine target grid for tile={pair.tile_id} sensing={pair.sensing_start_utc}: "
-        f"no reference rasters available."
-    )
-
-
-def _build_x(
-    *,
-    assets: Any,
-    dst_grid: RasterGrid,
-    cfg: PreprocessConfig,
-) -> Raster:
-    """Build input tensor X as Raster (C,H,W) float32.
-
-    Channel order:
-      - L1C bands in cfg.l1c_bands order
-      - angle feature channels (as returned by angles_to_sin_cos_features)
-    """
+def _build_x(*, assets: Any, dst_grid: RasterGrid, cfg: PreprocessConfig) -> Raster:
     rasters: list[Raster] = []
     names: list[str] = []
 
-    # L1C bands
-    for b in getattr(cfg, "l1c_bands", ()):
-        p = assets.l1c_bands[str(b)]
+    for b in cfg.l1c_bands:
+        p = Path(assets.l1c_bands[str(b)])
         r = read_raster(p)
-
-        # Always cast to float32 to allow stacking with float angle channels
-        arr = r.to_chw().astype(np.float32, copy=False)  # (1,H,W) or (C,H,W)
-        r = Raster(array=arr, grid=r.grid, nodata=None, band_names=[str(b)])
-
-        if r.grid != dst_grid:
-            # For reflectance/intensity bands, bilinear is fine; outside areas are typically 0.
-            r = resample_raster(r, dst_grid, method="bilinear", dst_nodata=0.0)
-
-        rasters.append(r)
-        names.extend(r.band_names or [str(b)])
-
-    # Angles
-    angles_cfg = getattr(cfg, "angles", None)
-    if angles_cfg is not None and (
-        getattr(angles_cfg, "include_sun", False)
-        or getattr(angles_cfg, "include_view", False)
-    ):
-        mtd = getattr(assets, "l1c_tile_metadata", None)
-        if mtd is None:
-            raise FileNotFoundError(
-                "Angles requested but L1C tile metadata XML is missing."
-            )
-        ang = parse_tile_metadata_angles(mtd, cfg=angles_cfg)
-        ang_r = angles_to_sin_cos_features(
-            angles=ang, dst_grid=dst_grid, cfg=angles_cfg
-        )
-        rasters.append(ang_r)
-        if ang_r.band_names:
-            names.extend(list(ang_r.band_names))
+        r_w = resample_raster(r, dst_grid, method="bilinear", dst_nodata=0.0)
+        rasters.append(r_w)
+        names.append(str(b))
 
     x = stack_rasters(rasters, band_names=names if names else None)
-    # Ensure float32
     x = Raster(
         array=x.to_chw().astype(np.float32, copy=False),
         grid=dst_grid,
@@ -197,133 +96,56 @@ def _build_x(
 
 
 def _build_y_and_label_stats(
-    *,
-    assets: Any,
-    dst_grid: RasterGrid,
-    cfg: PreprocessConfig,
-) -> tuple[Raster, dict[str, Any] | None]:
-    """Build label raster Y on dst_grid and optional label stats."""
-    scl_path = getattr(assets, "scl_20m", None)
-    if scl_path is None:
-        raise FileNotFoundError("SCL_20m is required for labels but is missing.")
+    *, assets: Any, dst_grid: RasterGrid, cfg: PreprocessConfig
+) -> tuple[Raster, dict[str, Any]]:
+    if assets.scl_20m is None:
+        raise FileNotFoundError("Missing SCL_20m; cannot build labels (y).")
 
-    scl = read_raster(scl_path)
-
-    labels_cfg = getattr(cfg, "labels", None)
-    out = scl_to_labels_with_meta(
-        scl=scl,
-        dst_grid=dst_grid,
-        cfg=labels_cfg,
-    )
-
-    label_stats: dict[str, Any] | None = None
-
-    # Be permissive: scl_to_labels may return either array/Raster or (array/Raster, stats)
-    y_arr: Any
-    if isinstance(out, tuple) and len(out) == 2:
-        y_arr, label_stats = out
-    else:
-        y_arr = out
-
-    if isinstance(y_arr, Raster):
-        y = y_arr
-    else:
-        # Assume 2D labels (H,W)
-        y = Raster(
-            array=np.asarray(y_arr),
-            grid=dst_grid,
-            nodata=getattr(labels_cfg, "ignore_index", 255),
-            band_names=["labels"],
-        )
-
+    scl = read_raster(Path(assets.scl_20m))
+    y, label_stats = scl_to_labels_with_meta(scl=scl, dst_grid=dst_grid, cfg=cfg.labels)
     return y, label_stats
 
 
-def _get_s2pipe_version() -> str:
-    # Best-effort; do not hard-fail if packaging metadata is missing.
-    try:
-        import s2pipe  # type: ignore
+def _build_angles_asset(*, assets: Any, cfg: PreprocessConfig) -> Raster | None:
+    angles_cfg = cfg.angles
+    if not angles_cfg.enabled:
+        return None
 
-        v = getattr(s2pipe, "__version__", None)
-        if isinstance(v, str) and v:
-            return v
-    except Exception:
-        pass
+    if assets.l1c_tile_metadata is None:
+        raise FileNotFoundError(
+            "Angles enabled but L1C tile metadata (MTD_TL.xml) is missing."
+        )
 
-    try:
-        import importlib.metadata as im
+    ang = parse_tile_metadata_angles(Path(assets.l1c_tile_metadata), cfg=angles_cfg)
+    # Step-2 export: keep angles on the native coarse grid => dst_grid=None
+    r = angles_to_sin_cos_features(angles=ang, cfg=angles_cfg, dst_grid=None)
 
-        return im.version("s2pipe")
-    except Exception:
-        return "unknown"
-
-
-def _build_meta(
-    *,
-    cfg: PreprocessConfig,
-    pair: IndexPair,
-    assets: Any,
-    x: Raster,
-    y: Raster,
-    label_stats: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Assemble meta.json (sample-level)."""
-    geo = pair.l1c.geofootprint or pair.l2a.geofootprint
-
-    meta: dict[str, Any] = {
-        "schema": "s2pipe.sample.meta.v1",
-        "created_utc": _utc_now_iso(),
-        "s2pipe_version": _get_s2pipe_version(),
-        "key": {
-            "tile_id": pair.tile_id,
-            "sensing_start_utc": pair.sensing_start_utc,
-        },
-        "grid": {
-            "crs": x.grid.crs,
-            "width": x.grid.width,
-            "height": x.grid.height,
-            "res": list(x.grid.res),
-            # affine as 6-tuple (a,b,c,d,e,f)
-            "transform": [
-                x.grid.transform.a,
-                x.grid.transform.b,
-                x.grid.transform.c,
-                x.grid.transform.d,
-                x.grid.transform.e,
-                x.grid.transform.f,
-            ],
-        },
-        "channels": {
-            "x": list(x.band_names or []),
-            "y": list(y.band_names or []),
-        },
-        # Preferred minimal coverage key (renamed from coverage_ratio)
-        "coverage": getattr(assets, "coverage_ratio", None),
-        "cloud_cover": getattr(assets, "cloud_cover", None),
-        "geofootprint": geo,  # GeoJSON (best-effort)
-        "step1": {
-            # Keep original names and provenance if needed later
-            "coverage_ratio": getattr(assets, "coverage_ratio", None),
-            "scl_percentages": getattr(assets, "scl_percentages", None),
-        },
-    }
-
-    if label_stats:
-        meta["labels"] = label_stats
-
-    return meta
+    return Raster(
+        array=r.to_chw().astype(np.float32, copy=False),
+        grid=r.grid,
+        nodata=np.nan,
+        band_names=r.band_names,
+    )
 
 
 def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
-    """Step 2 orchestrator (sequential).
+    """Step-2 orchestrator.
 
-    Normalization is intentionally not implemented yet; cfg.normalize is ignored for now.
+    Per (tile_id, sensing_start_utc) pair:
+      1) read Step-1 index.json
+      2) select required assets
+      3) choose target grid from a reference raster (cfg.target_grid_ref)
+      4) build X by resampling selected L1C bands to target grid
+      5) build Y + label_stats from L2A SCL_20m (nearest)
+      6) optionally build coarse-grid angles asset (angles.tif)
+      7) export x/y/meta (+ extra assets) and update run manifest + global Step-2 index.json
+
+    Note: normalization (streaming mean/std) is not implemented yet.
     """
-    index: DownloadIndex = load_download_index(cfg.index_json)
-
+    index = load_download_index(cfg.index_json)
     out_dir = Path(cfg.out_dir).resolve()
-    run_id = (cfg.run_id or _default_run_id()).strip()
 
+    run_id = (cfg.run_id or _default_run_id()).strip()
     run_manifest_path = out_dir / "meta" / "step2" / "runs" / f"run={run_id}.jsonl"
     step2_index_path = out_dir / "meta" / "step2" / "index.json"
 
@@ -331,129 +153,139 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
     failed = 0
     skipped = 0
 
-    # Load/merge existing global Step-2 index
-    step2_index = _load_step2_index(step2_index_path)
-    step2_index["output"] = {"out_dir": str(out_dir)}
-    samples: list[dict[str, Any]] = (
-        step2_index.get("samples")
-        if isinstance(step2_index.get("samples"), list)
-        else []
-    )
-    by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for s in samples:
-        try:
-            k = s.get("key", {})
-            kk = (str(k.get("tile_id")), str(k.get("sensing_start_utc")))
-            by_key[kk] = s
-        except Exception:
-            continue
-
-    max_pairs = getattr(cfg, "max_pairs", None)
+    need_angles = bool(cfg.angles.enabled)
 
     for i, pair in enumerate(index.pairs):
-        if max_pairs is not None and i >= int(max_pairs):
+        if cfg.max_pairs is not None and i >= int(cfg.max_pairs):
             break
 
+        key = {"tile_id": pair.tile_id, "sensing_start_utc": pair.sensing_start_utc}
+
         try:
-            # Select assets
             assets = select_assets(
                 pair,
                 index,
-                l1c_bands=list(getattr(cfg, "l1c_bands", ())),
-                need_l1c_tile_metadata=True,
+                l1c_bands=tuple(cfg.l1c_bands),
+                need_l1c_tile_metadata=need_angles,
                 need_l2a_tile_metadata=False,
                 need_scl_20m=True,
                 require_present=True,
             )
 
-            # Target grid
-            dst_grid = _build_target_grid(pair=pair, assets=assets, cfg=cfg)
+            ref_path = _choose_target_grid_ref_path(assets, cfg)
+            dst_grid = grid_from_reference_raster(ref_path)
 
-            # X/Y
             x = _build_x(assets=assets, dst_grid=dst_grid, cfg=cfg)
             y, label_stats = _build_y_and_label_stats(
                 assets=assets, dst_grid=dst_grid, cfg=cfg
             )
 
-            # Meta
-            meta = _build_meta(
-                cfg=cfg, pair=pair, assets=assets, x=x, y=y, label_stats=label_stats
+            angles_r = (
+                _build_angles_asset(assets=assets, cfg=cfg) if need_angles else None
             )
 
-            # Write sample
+            extra_assets: dict[str, Raster] = {}
+            extra_filenames: dict[str, str] = {}
+            if angles_r is not None:
+                extra_assets["angles"] = angles_r
+                extra_filenames["angles"] = cfg.angles.output_name
+
+            # Scene-level metadata (stored in meta.json)
+            geo = pair.l2a.geofootprint or pair.l1c.geofootprint
+            meta_extra = {
+                "scene": {
+                    "cloud_cover": assets.cloud_cover,
+                    "coverage_fraction": assets.coverage_ratio,
+                    "geofootprint": geo,  # GeoJSON if present in Step-1 index
+                    "scl_percentages": assets.scl_percentages,
+                },
+                "label_stats": label_stats,
+            }
+
             sample = write_processed_sample(
-                out_dir=out_dir,
+                out_dir,
                 tile_id=pair.tile_id,
                 sensing_start_utc=pair.sensing_start_utc,
                 x=x,
                 y=y,
-                meta=meta,
+                meta_extra=meta_extra,
+                extra_assets=extra_assets or None,
+                extra_asset_filenames=extra_filenames or None,
+            )
+
+            paths_rel = {
+                name: _relpath_str(out_dir, p) for name, p in sample.asset_paths.items()
+            }
+
+            ok_rec = {
+                "ts_utc": _utc_now_iso(),
+                "run_id": run_id,
+                "status": "ok",
+                "key": key,
+                "paths": paths_rel,
+            }
+            update_preprocess_manifest(run_manifest_path, record=ok_rec)
+
+            # Upsert Step-2 global index
+            sample_rec = {
+                "key": key,
+                "run_id": run_id,
+                "status": "ok",
+                "paths": paths_rel,
+            }
+            update_step2_index(
+                step2_index_path,
+                sample_rec=sample_rec,
+                output={
+                    "out_dir": str(out_dir),
+                    "last_run_id": run_id,
+                    "last_run_manifest": _relpath_str(out_dir, run_manifest_path),
+                },
             )
 
             processed += 1
 
-            # Run manifest record
-            rec_ok = {
-                "ts_utc": _utc_now_iso(),
-                "run_id": run_id,
-                "status": "ok",
-                "key": {
-                    "tile_id": pair.tile_id,
-                    "sensing_start_utc": pair.sensing_start_utc,
-                },
-                "paths": {
-                    "x": _relpath_str(out_dir, sample.x_path),
-                    "y": _relpath_str(out_dir, sample.y_path),
-                    "meta": _relpath_str(out_dir, sample.meta_path),
-                },
-            }
-            _append_jsonl(run_manifest_path, rec_ok)
-
-            # Update in-memory global index
-            kk = (pair.tile_id, pair.sensing_start_utc)
-            by_key[kk] = {
-                "key": {
-                    "tile_id": pair.tile_id,
-                    "sensing_start_utc": pair.sensing_start_utc,
-                },
-                "paths": rec_ok["paths"],
-                "run_id": run_id,
-                "status": "ok",
-            }
-
         except Exception as e:
             failed += 1
-            err = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            tb = "".join(traceback.format_exception(type(e), e, e.__traceback__))
 
-            rec_fail = {
+            err_rec = {
                 "ts_utc": _utc_now_iso(),
                 "run_id": run_id,
-                "status": "failed",
-                "key": {
-                    "tile_id": pair.tile_id,
-                    "sensing_start_utc": pair.sensing_start_utc,
-                },
+                "status": "error",
+                "key": key,
                 "error": str(e),
-                "traceback": err,
+                "traceback": tb,
             }
-            _append_jsonl(run_manifest_path, rec_fail)
+            update_preprocess_manifest(run_manifest_path, record=err_rec)
+
+            # Also upsert into global index to make failures visible.
+            update_step2_index(
+                step2_index_path,
+                sample_rec={
+                    "key": key,
+                    "run_id": run_id,
+                    "status": "error",
+                    "error": str(e),
+                },
+                output={
+                    "out_dir": str(out_dir),
+                    "last_run_id": run_id,
+                    "last_run_manifest": _relpath_str(out_dir, run_manifest_path),
+                },
+            )
+
             log.exception(
-                "Preprocess failed for tile=%s sensing=%s",
+                "Step-2 preprocess failed for tile=%s sensing=%s",
                 pair.tile_id,
                 pair.sensing_start_utc,
             )
 
-    # Write global Step-2 index (atomic)
-    step2_index["updated_utc"] = _utc_now_iso()
-    step2_index["samples"] = list(by_key.values())
-    _write_json_atomic(step2_index_path, step2_index)
-
     return PreprocessResult(
         run_id=run_id,
         run_manifest_path=run_manifest_path,
-        stats_path=None,
+        step2_index_path=step2_index_path,
         processed_count=processed,
         failed_count=failed,
         skipped_count=skipped,
-        step2_index_path=step2_index_path,
     )
