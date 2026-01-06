@@ -79,7 +79,7 @@ class RunControlConfig:
 class ManifestConfig:
     manifest_version: str = "1.0"
 
-    # Per-run outputs (written under meta/manifest/runs/<RUN_ID>/)
+    # Per-run outputs (written under meta/step1/runs/<RUN_ID>/)
     write_json: bool = True
     json_name: str = "manifest.json"
 
@@ -87,7 +87,7 @@ class ManifestConfig:
     table_csv_name: str = "manifest_table.csv"
     table_xlsx_name: str = "manifest_table.xlsx"
 
-    runs_dir: str = "runs"          # subdir under <out_dir>/meta/manifest/
+    runs_dir: str = "runs"          # subdir under <out_dir>/meta/step1/
     index_name: str = "index.json"  # aggregated across runs (deduped)
 
     # Optional:

@@ -1,28 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import json
 import re
 
-from .cfg import PipelineConfig, validate
-from .cdse.auth import CDSEAuth, get_access_token
-from .cdse.http import CDSEHttpClient, TokenManager
-from .cdse.odata import build_filter_basic, search_products_odata, parse_safe_name, choose_best_product_by_name, ProductHit
-from .cdse.nodes import index_product_nodes
-from .cdse.select import select_assets_l1c, select_assets_l2a
-from .cdse.download import download_node, pair_dir
-from .io.paths import make_paths, ensure_dirs
-from .io.manifest import (
-    FileItem, LevelFiles, PairEntry, PairKey, ProductInfo,
-    new_manifest, write_manifest_json,
-    run_id_now, update_download_index,
+from s2pipe.download.cfg import PipelineConfig, validate
+from s2pipe.download.auth import CDSEAuth, get_access_token
+from s2pipe.download.http import CDSEHttpClient, TokenManager
+from s2pipe.download.odata import (
+    build_filter_basic,
+    search_products_odata,
+    parse_safe_name,
+    choose_best_product_by_name,
+    ProductHit,
+)
+from s2pipe.download.nodes import index_product_nodes
+from s2pipe.download.select import select_assets_l1c, select_assets_l2a
+from s2pipe.download.download import download_node, pair_dir
+from s2pipe.download.paths import make_paths, ensure_dirs
+from s2pipe.download.manifest import (
+    FileItem,
+    LevelFiles,
+    PairEntry,
+    PairKey,
+    ProductInfo,
+    new_manifest,
+    write_manifest_json,
+    run_id_now,
+    update_download_index,
     parse_scl_percentages_from_mtd_tl,
 )
-from .io.export import pairs_to_dataframe, export_table
+from s2pipe.download.export import pairs_to_dataframe, export_table
 
 
 @dataclass(frozen=True)
@@ -45,7 +57,9 @@ def _group_best(products: list[ProductHit]) -> dict[tuple[str, Any], ProductHit]
     return best
 
 
-def _pair_l1c_l2a(l1c: list[ProductHit], l2a: list[ProductHit]) -> list[tuple[str, Any, ProductHit, ProductHit]]:
+def _pair_l1c_l2a(
+    l1c: list[ProductHit], l2a: list[ProductHit]
+) -> list[tuple[str, Any, ProductHit, ProductHit]]:
     l1c_best = _group_best(l1c)
     l2a_best = _group_best(l2a)
     out: list[tuple[str, Any, ProductHit, ProductHit]] = []
@@ -110,7 +124,12 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
     pair_entries: list[PairEntry] = []
 
     for tile, sensing_dt, l1c, l2a in pairs_raw:
-        sensing_iso = sensing_dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        sensing_iso = (
+            sensing_dt.astimezone(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
         sensing_compact = sensing_dt.strftime("%Y%m%dT%H%M%S")
 
         # Index nodes
@@ -136,8 +155,12 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         nodes_l2a = select_assets_l2a(idx_l2a, cfg.selection)
 
         # Download paths
-        l1c_root = pair_dir(paths.raw_l1c, tile_id=tile, sensing_compact=sensing_compact)
-        l2a_root = pair_dir(paths.raw_l2a, tile_id=tile, sensing_compact=sensing_compact)
+        l1c_root = pair_dir(
+            paths.raw_l1c, tile_id=tile, sensing_compact=sensing_compact
+        )
+        l2a_root = pair_dir(
+            paths.raw_l2a, tile_id=tile, sensing_compact=sensing_compact
+        )
 
         file_items_l1c: list[FileItem] = []
         file_items_l2a: list[FileItem] = []
@@ -150,15 +173,27 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             l2a_root.mkdir(parents=True, exist_ok=True)
 
             # Optional: keep basic provenance
-            (l1c_root.parent / "product_id.txt").write_text(l1c.cdse_id, encoding="utf-8")
-            (l1c_root.parent / "product_name.txt").write_text(l1c.name, encoding="utf-8")
-            (l2a_root.parent / "product_id.txt").write_text(l2a.cdse_id, encoding="utf-8")
-            (l2a_root.parent / "product_name.txt").write_text(l2a.name, encoding="utf-8")
+            (l1c_root.parent / "product_id.txt").write_text(
+                l1c.cdse_id, encoding="utf-8"
+            )
+            (l1c_root.parent / "product_name.txt").write_text(
+                l1c.name, encoding="utf-8"
+            )
+            (l2a_root.parent / "product_id.txt").write_text(
+                l2a.cdse_id, encoding="utf-8"
+            )
+            (l2a_root.parent / "product_name.txt").write_text(
+                l2a.name, encoding="utf-8"
+            )
 
         for n in nodes_l1c:
             fn = n.parts[-1]
             dst = l1c_root / fn
-            role = "tile_metadata" if fn == "MTD_TL.xml" else ("band" if fn.lower().endswith(".jp2") else "file")
+            role = (
+                "tile_metadata"
+                if fn == "MTD_TL.xml"
+                else ("band" if fn.lower().endswith(".jp2") else "file")
+            )
             band = None
             if role == "band":
                 # try to parse band suffix like "_B02.jp2"
@@ -172,7 +207,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                         role=role,
                         path=str(dst.relative_to(paths.root)),
                         band=band,
-                        planned=True
+                        planned=True,
                     )
                 )
             else:
@@ -190,7 +225,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                         path=str(dst.relative_to(paths.root)),
                         band=band,
                         planned=False,
-                        present=True
+                        present=True,
                     )
                 )
 
@@ -199,15 +234,17 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         for n in nodes_l2a:
             fn = n.parts[-1]
             dst = l2a_root / fn
-            role = "tile_metadata" if fn == "MTD_TL.xml" else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
+            role = (
+                "tile_metadata"
+                if fn == "MTD_TL.xml"
+                else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
+            )
             if role == "tile_metadata":
                 l2a_mtd_tl_path = dst
             if cfg.download.dry_run:
                 file_items_l2a.append(
                     FileItem(
-                        role=role,
-                        path=str(dst.relative_to(paths.root)),
-                        planned=True
+                        role=role, path=str(dst.relative_to(paths.root)), planned=True
                     )
                 )
             else:
@@ -224,7 +261,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                         role=role,
                         path=str(dst.relative_to(paths.root)),
                         planned=False,
-                        present=True
+                        present=True,
                     )
                 )
 
@@ -252,13 +289,19 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             scl_percentages=scl_pct,
         )
 
-        pair_entries.append(PairEntry(
-            key=PairKey(tile_id=tile, sensing_start_utc=sensing_iso),
-            l1c=l1c_info,
-            l2a=l2a_info,
-            files_l1c=LevelFiles(root_dir=str(l1c_root.relative_to(paths.root)), items=file_items_l1c),
-            files_l2a=LevelFiles(root_dir=str(l2a_root.relative_to(paths.root)), items=file_items_l2a),
-        ))
+        pair_entries.append(
+            PairEntry(
+                key=PairKey(tile_id=tile, sensing_start_utc=sensing_iso),
+                l1c=l1c_info,
+                l2a=l2a_info,
+                files_l1c=LevelFiles(
+                    root_dir=str(l1c_root.relative_to(paths.root)), items=file_items_l1c
+                ),
+                files_l2a=LevelFiles(
+                    root_dir=str(l2a_root.relative_to(paths.root)), items=file_items_l2a
+                ),
+            )
+        )
 
     manifest_path = None
     table_csv_path = None
@@ -266,7 +309,9 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
 
     if cfg.manifest.write_json:
         q = {
-            "tile_id": cfg.query.tile_id if cfg.query.tile_id.startswith("T") else f"T{cfg.query.tile_id}",
+            "tile_id": cfg.query.tile_id
+            if cfg.query.tile_id.startswith("T")
+            else f"T{cfg.query.tile_id}",
             "date_from_utc": cfg.query.date_from_utc,
             "date_to_utc": cfg.query.date_to_utc,
             "cloud_min": cfg.query.cloud_min,
@@ -292,7 +337,9 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         write_manifest_json(m, manifest_path)
 
         # Load pairs (dict form) from the run manifest
-        pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get("pairs", [])
+        pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get(
+            "pairs", []
+        )
 
         # update aggregated index.json.
         if not cfg.download.dry_run:

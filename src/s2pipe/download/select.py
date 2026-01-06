@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Sequence
 
 from .nodes import NodeEntry
-from ..cfg import SelectionConfig
+from s2pipe.download.cfg import SelectionConfig
 
 
 def _endswith_any(name: str, suffixes: Sequence[str]) -> bool:
@@ -11,7 +11,9 @@ def _endswith_any(name: str, suffixes: Sequence[str]) -> bool:
     return any(name_l.endswith(s.lower()) for s in suffixes)
 
 
-def select_assets_l1c(index: Sequence[NodeEntry], sel: SelectionConfig) -> list[NodeEntry]:
+def select_assets_l1c(
+    index: Sequence[NodeEntry], sel: SelectionConfig
+) -> list[NodeEntry]:
     out: list[NodeEntry] = []
 
     want_bands = set(sel.l1c_bands)
@@ -32,7 +34,9 @@ def select_assets_l1c(index: Sequence[NodeEntry], sel: SelectionConfig) -> list[
     return out
 
 
-def select_assets_l2a(index: Sequence[NodeEntry], sel: SelectionConfig) -> list[NodeEntry]:
+def select_assets_l2a(
+    index: Sequence[NodeEntry], sel: SelectionConfig
+) -> list[NodeEntry]:
     out: list[NodeEntry] = []
 
     for n in index:

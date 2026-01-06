@@ -17,7 +17,7 @@ def make_paths(out_dir: Path) -> OutputPaths:
     root = out_dir
     raw_l1c = root / "raw" / "L1C"
     raw_l2a = root / "raw" / "L2A"
-    manifest_dir = root / "meta" / "manifest"
+    manifest_dir = root / "meta" / "step1"
     tmp = root / "tmp"
     return OutputPaths(root=root, raw_l1c=raw_l1c, raw_l2a=raw_l2a, manifest_dir=manifest_dir, tmp=tmp)
 
