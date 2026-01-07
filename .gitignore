@@ -1,15 +1,32 @@
+# Python: bytecode and interpreter caches
 __pycache__/
 *.pyc
+
+# Python tooling: test/type-check/lint caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.DS_Store
+
+# Jupyter: notebook checkpoint folders
 .ipynb_checkpoints/
+
+# OS / system files
+.DS_Store
+
+# IDE / editor project settings
 .idea
+
+# Build and packaging artifacts
 dist/
 build/
 *.egg-info/
+
+# Project-generated outputs / temporary working directories
 out/
-out_local/
+
+# Project-specific directories (adjust if these should be versioned)
 tools/
-tests/fixtures/step1_single_tile
+tests/fixtures/single_tile
+
+# Build scripts (keep tracked unless you explicitly want to ignore it)
+Makefile
