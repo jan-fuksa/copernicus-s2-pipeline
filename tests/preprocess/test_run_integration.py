@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import inspect
 import json
 from pathlib import Path
@@ -11,6 +10,7 @@ import rasterio
 
 from s2pipe.preprocess.inputs import load_download_index, select_assets
 from s2pipe.preprocess.run import run_preprocess
+from s2pipe.preprocess.cfg import PreprocessConfig, AngleAssetConfig
 
 
 def _repo_root() -> Path:
@@ -20,13 +20,7 @@ def _repo_root() -> Path:
 def _find_step1_index_json() -> Path:
     root = _repo_root()
     candidates = [
-        root
-        / "tests"
-        / "fixtures"
-        / "step1_single_tile"
-        / "meta"
-        / "manifest"
-        / "index.json",
+        root / "tests" / "fixtures" / "single_tile" / "meta" / "step1" / "index.json",
     ]
     for p in candidates:
         if p.exists():
@@ -74,34 +68,16 @@ def _choose_available_l1c_band(index_path: Path) -> str:
 
 
 def _make_cfg(index_json: Path, out_dir: Path, run_id: str, band: str):
-    cfg_mod = importlib.import_module("s2pipe.preprocess.cfg")
-    PreprocessConfig = getattr(cfg_mod, "PreprocessConfig")
-
-    # angles config: support either AngleAssetConfig (newer) or AngleFeatureConfig (older)
-    AngleAssetConfig = getattr(cfg_mod, "AngleAssetConfig", None)
-    AngleFeatureConfig = getattr(cfg_mod, "AngleFeatureConfig", None)
-
-    if AngleAssetConfig is not None:
-        angles_cfg = AngleAssetConfig(
-            enabled=True,
-            include_sun=True,
-            include_view=True,
-            encode="sin_cos",
-            view_mode="per_band",
-            view_bands=(band,),
-            detector_aggregate="nanmean",
-            output_name="angles.tif",
-        )
-    elif AngleFeatureConfig is not None:
-        angles_cfg = AngleFeatureConfig(
-            include_sun=True,
-            include_view=True,
-            encode_sin_cos=True,
-            view_mode="per_band",
-            view_bands=(band,),
-        )
-    else:
-        angles_cfg = None
+    angles_cfg = AngleAssetConfig(
+        enabled=True,
+        include_sun=True,
+        include_view=True,
+        encode="sin_cos",
+        view_mode="per_band",
+        view_bands=(band,),
+        detector_aggregate="nanmean",
+        output_name="angles.tif",
+    )
 
     sig = inspect.signature(PreprocessConfig)
     kwargs: dict[str, Any] = {}

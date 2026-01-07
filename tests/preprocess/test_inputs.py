@@ -17,15 +17,13 @@ def _testdata_root() -> Path:
     env = os.environ.get("S2PIPE_TESTDATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return (
-        Path(__file__).resolve().parents[1] / "fixtures" / "step1_single_tile"
-    ).resolve()
+    return (Path(__file__).resolve().parents[1] / "fixtures" / "single_tile").resolve()
 
 
 @pytest.mark.integration
 def test_load_iter_select_assets():
     root = _testdata_root()
-    index_path = root / "meta" / "manifest" / "index.json"
+    index_path = root / "meta" / "step1" / "index.json"
     if not index_path.exists():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 

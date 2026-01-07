@@ -59,16 +59,16 @@ from typing import Any, Iterator, Optional, Sequence
 
 @dataclass(frozen=True)
 class IndexFileItem:
-    role: str                  # "band" | "tile_metadata" | "scl_20m" | ...
-    path: str                  # relative to out_dir
-    band: Optional[str]        # e.g. "B02" or None
+    role: str  # "band" | "tile_metadata" | "scl_20m" | ...
+    path: str  # relative to out_dir
+    band: Optional[str]  # e.g. "B02" or None
     planned: bool
     present: bool
 
 
 @dataclass(frozen=True)
 class IndexFiles:
-    root_dir: str              # e.g. "raw/L1C/.../files"
+    root_dir: str  # e.g. "raw/L1C/.../files"
     items: list[IndexFileItem]
 
 
@@ -103,13 +103,14 @@ class DownloadIndex:
 @dataclass(frozen=True)
 class SelectedAssets:
     """Resolved absolute paths for assets required by preprocessing."""
+
     # L1C
-    l1c_bands: dict[str, Path]                 # band -> absolute path
-    l1c_tile_metadata: Path | None             # MTD_TL.xml (optional)
+    l1c_bands: dict[str, Path]  # band -> absolute path
+    l1c_tile_metadata: Path | None  # MTD_TL.xml (optional)
 
     # L2A
-    l2a_tile_metadata: Path | None             # MTD_TL.xml (optional)
-    scl_20m: Path | None                       # SCL_20m.jp2 (optional)
+    l2a_tile_metadata: Path | None  # MTD_TL.xml (optional)
+    scl_20m: Path | None  # SCL_20m.jp2 (optional)
 
     # passthrough metadata (useful for Step 2 manifest)
     cloud_cover: float | None
@@ -149,7 +150,7 @@ def _resolve_out_dir(index_path: Path, out_dir_str: str | None) -> Path:
     """Resolve dataset root directory.
 
     Step-1 index.json is typically at:
-      <out_dir>/meta/manifest/index.json
+      <out_dir>/meta/step1/index.json
 
     If out_dir_str is absolute, trust it.
     If it is relative (or missing), prefer the directory implied by index_path location.
@@ -159,7 +160,7 @@ def _resolve_out_dir(index_path: Path, out_dir_str: str | None) -> Path:
         if p.is_absolute():
             return p
 
-    # Candidate derived from index.json location: <out_dir>/meta/manifest/index.json
+    # Candidate derived from index.json location: <out_dir>/meta/step1/index.json
     try:
         candidate = index_path.parents[2]
         if (candidate / "meta").exists() or (candidate / "raw").exists():
@@ -191,8 +192,12 @@ def _parse_product_meta(d: dict[str, Any], *, context: str) -> ProductMeta:
         rel_orbit=_as_str_or_none(d.get("rel_orbit")),
         cloud_cover=_as_float_or_none(d.get("cloud_cover")),
         coverage_ratio=_as_float_or_none(d.get("coverage_ratio")),
-        geofootprint=d.get("geofootprint") if isinstance(d.get("geofootprint"), dict) else None,
-        scl_percentages=d.get("scl_percentages") if isinstance(d.get("scl_percentages"), dict) else None,
+        geofootprint=d.get("geofootprint")
+        if isinstance(d.get("geofootprint"), dict)
+        else None,
+        scl_percentages=d.get("scl_percentages")
+        if isinstance(d.get("scl_percentages"), dict)
+        else None,
     )
 
 
@@ -269,8 +274,12 @@ def load_download_index(index_path: Path) -> DownloadIndex:
 
         l1c = _parse_product_meta(p.get("l1c", {}), context=f"pairs[{i}].l1c")
         l2a = _parse_product_meta(p.get("l2a", {}), context=f"pairs[{i}].l2a")
-        files_l1c = _parse_files(p.get("files_l1c", {}), context=f"pairs[{i}].files_l1c")
-        files_l2a = _parse_files(p.get("files_l2a", {}), context=f"pairs[{i}].files_l2a")
+        files_l1c = _parse_files(
+            p.get("files_l1c", {}), context=f"pairs[{i}].files_l1c"
+        )
+        files_l2a = _parse_files(
+            p.get("files_l2a", {}), context=f"pairs[{i}].files_l2a"
+        )
 
         pairs.append(
             IndexPair(
@@ -286,7 +295,9 @@ def load_download_index(index_path: Path) -> DownloadIndex:
     return DownloadIndex(out_dir=out_dir, pairs=pairs)
 
 
-def iter_pairs(index: DownloadIndex, *, require_present: bool = False) -> Iterator[IndexPair]:
+def iter_pairs(
+    index: DownloadIndex, *, require_present: bool = False
+) -> Iterator[IndexPair]:
     """Yield pairs from the index.
 
     Note:
@@ -329,7 +340,9 @@ def _pick_single_item(
         return cand_present[0]
 
     if require_present:
-        raise FileNotFoundError(f"Item role={role!r} band={band!r} exists only as planned/non-present")
+        raise FileNotFoundError(
+            f"Item role={role!r} band={band!r} exists only as planned/non-present"
+        )
 
     return cand[0]
 
@@ -350,7 +363,12 @@ def select_assets(
     missing_bands: list[str] = []
     for b in l1c_bands:
         try:
-            it = _pick_single_item(pair.files_l1c.items, role="band", band=str(b), require_present=require_present)
+            it = _pick_single_item(
+                pair.files_l1c.items,
+                role="band",
+                band=str(b),
+                require_present=require_present,
+            )
             bands_out[str(b)] = resolve_path(index, it.path)
         except FileNotFoundError:
             missing_bands.append(str(b))
@@ -362,18 +380,33 @@ def select_assets(
     # Tile metadata
     l1c_mtd: Path | None = None
     if need_l1c_tile_metadata:
-        it = _pick_single_item(pair.files_l1c.items, role="tile_metadata", band=None, require_present=require_present)
+        it = _pick_single_item(
+            pair.files_l1c.items,
+            role="tile_metadata",
+            band=None,
+            require_present=require_present,
+        )
         l1c_mtd = resolve_path(index, it.path)
 
     l2a_mtd: Path | None = None
     if need_l2a_tile_metadata:
-        it = _pick_single_item(pair.files_l2a.items, role="tile_metadata", band=None, require_present=require_present)
+        it = _pick_single_item(
+            pair.files_l2a.items,
+            role="tile_metadata",
+            band=None,
+            require_present=require_present,
+        )
         l2a_mtd = resolve_path(index, it.path)
 
     # SCL
     scl_path: Path | None = None
     if need_scl_20m:
-        it = _pick_single_item(pair.files_l2a.items, role="scl_20m", band=None, require_present=require_present)
+        it = _pick_single_item(
+            pair.files_l2a.items,
+            role="scl_20m",
+            band=None,
+            require_present=require_present,
+        )
         scl_path = resolve_path(index, it.path)
 
     return SelectedAssets(
@@ -391,6 +424,7 @@ def select_assets(
 # Backwards-compatible wrappers (optional).
 # You may remove these once callers are migrated to select_assets().
 # ---------------------------------------------------------------------
+
 
 def select_l1c_band_paths(
     pair: IndexPair,
@@ -414,7 +448,7 @@ def select_tile_metadata_path(
     pair: IndexPair,
     index: DownloadIndex,
     *,
-    level: str,                 # "L1C" | "L2A"
+    level: str,  # "L1C" | "L2A"
     require_present: bool = True,
 ) -> Path:
     lvl = level.strip().upper()

@@ -20,7 +20,7 @@ def _repo_root() -> Path:
 
 def _fixture_root() -> Path:
     root = _repo_root()
-    p = root / "tests" / "fixtures" / "step1_single_tile"
+    p = root / "tests" / "fixtures" / "single_tile"
     if not p.exists():
         pytest.skip(f"Fixture directory not found: {p}")
     return p

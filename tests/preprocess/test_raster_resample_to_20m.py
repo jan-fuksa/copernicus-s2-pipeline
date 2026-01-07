@@ -13,21 +13,21 @@ def _testdata_root() -> Path:
     """Return the root directory for Step-1 fixture data.
 
     Default:
-        tests/fixtures/step1_single_tile
+        tests/fixtures/single_tile
 
     Override:
-        export S2PIPE_TESTDATA_DIR=/abs/path/to/step1_single_tile
+        export S2PIPE_TESTDATA_DIR=/abs/path/to/single_tile
     """
     env = os.environ.get("S2PIPE_TESTDATA_DIR")
     if env:
         return Path(env).expanduser().resolve()
-    return (Path(__file__).resolve().parents[1] / "fixtures" / "step1_single_tile").resolve()
+    return (Path(__file__).resolve().parents[1] / "fixtures" / "single_tile").resolve()
 
 
 @pytest.mark.integration
 def test_resample_10m_and_60m_to_20m_grid_from_scl():
     root = _testdata_root()
-    index_path = root / "meta" / "manifest" / "index.json"
+    index_path = root / "meta" / "step1" / "index.json"
     if not index_path.exists():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 
@@ -38,7 +38,7 @@ def test_resample_10m_and_60m_to_20m_grid_from_scl():
     assets = select_assets(
         pair,
         index,
-        l1c_bands=["B02", "B01"],       # B02=10m, B01=60m
+        l1c_bands=["B02", "B01"],  # B02=10m, B01=60m
         need_l1c_tile_metadata=False,
         need_l2a_tile_metadata=False,
         need_scl_20m=True,
@@ -54,7 +54,9 @@ def test_resample_10m_and_60m_to_20m_grid_from_scl():
     target_grid = grid_from_reference_raster(assets.scl_20m)
 
     # Sanity: expected approximate resolutions (UTM meters)
-    assert abs(target_grid.res_m - 20.0) < 0.5, f"Unexpected target res_m={target_grid.res_m}"
+    assert abs(target_grid.res_m - 20.0) < 0.5, (
+        f"Unexpected target res_m={target_grid.res_m}"
+    )
     assert abs(b02.grid.res_m - 10.0) < 0.5, f"Unexpected B02 res_m={b02.grid.res_m}"
     assert abs(b01.grid.res_m - 60.0) < 1.0, f"Unexpected B01 res_m={b01.grid.res_m}"
 
@@ -77,7 +79,7 @@ def test_resample_10m_and_60m_to_20m_grid_from_scl():
 @pytest.mark.integration
 def test_scl_nearest_preserves_integer_classes_on_20m_grid():
     root = _testdata_root()
-    index_path = root / "meta" / "manifest" / "index.json"
+    index_path = root / "meta" / "step1" / "index.json"
     if not index_path.exists():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 
@@ -88,7 +90,7 @@ def test_scl_nearest_preserves_integer_classes_on_20m_grid():
     assets = select_assets(
         pair,
         index,
-        l1c_bands=[],                   # no L1C bands needed for this test
+        l1c_bands=[],  # no L1C bands needed for this test
         need_l1c_tile_metadata=False,
         need_l2a_tile_metadata=False,
         need_scl_20m=True,
@@ -108,8 +110,12 @@ def test_scl_nearest_preserves_integer_classes_on_20m_grid():
 
     # Nearest on categorical labels must preserve integer-valued classes.
     # (SCL is typically uint8, but we just enforce "integer dtype" and "no fractional values".)
-    assert np.issubdtype(a.dtype, np.integer), f"Expected integer dtype for SCL, got {a.dtype}"
+    assert np.issubdtype(a.dtype, np.integer), (
+        f"Expected integer dtype for SCL, got {a.dtype}"
+    )
 
     # Defensive: if something upstream caused float conversion, ensure values are integral anyway.
     if np.issubdtype(a.dtype, np.floating):
-        assert np.all(np.isclose(a, np.round(a))), "SCL values are not integral after nearest resampling."
+        assert np.all(np.isclose(a, np.round(a))), (
+            "SCL values are not integral after nearest resampling."
+        )

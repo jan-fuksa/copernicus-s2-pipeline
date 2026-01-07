@@ -20,13 +20,7 @@ def _repo_root() -> Path:
 def _fixture_index_path() -> Path:
     root = _repo_root()
     candidates = [
-        root
-        / "tests"
-        / "fixtures"
-        / "step1_single_tile"
-        / "meta"
-        / "manifest"
-        / "index.json",
+        root / "tests" / "fixtures" / "single_tile" / "meta" / "step1" / "index.json",
     ]
     for p in candidates:
         if p.exists():

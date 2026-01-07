@@ -6,9 +6,18 @@ from typing import Any
 
 import yaml
 
-from .cfg import PipelineConfig, QueryConfig, SelectionConfig, NodesIndexConfig, DownloadConfig, RunControlConfig, ManifestConfig, validate
-from .cdse.auth import prompt_auth
-from .pipeline import run_download
+from s2pipe.download.cfg import (
+    PipelineConfig,
+    QueryConfig,
+    SelectionConfig,
+    NodesIndexConfig,
+    DownloadConfig,
+    RunControlConfig,
+    ManifestConfig,
+    validate,
+)
+from .download.auth import prompt_auth
+from s2pipe.download.pipeline import run_download
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -16,7 +25,12 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def _cfg_from_dict(d: dict[str, Any], *, out_dir_override: str | None = None, dry_run_override: bool | None = None) -> PipelineConfig:
+def _cfg_from_dict(
+    d: dict[str, Any],
+    *,
+    out_dir_override: str | None = None,
+    dry_run_override: bool | None = None,
+) -> PipelineConfig:
     q = d.get("query", {}) or {}
     sel = d.get("selection", {}) or {}
     nidx = d.get("nodes_index", {}) or {}
@@ -49,14 +63,22 @@ def _cfg_from_dict(d: dict[str, Any], *, out_dir_override: str | None = None, dr
     )
 
     nodes_index = NodesIndexConfig(
-        skip_dir_names=frozenset(nidx.get("skip_dir_names", list(NodesIndexConfig().skip_dir_names))),
+        skip_dir_names=frozenset(
+            nidx.get("skip_dir_names", list(NodesIndexConfig().skip_dir_names))
+        ),
         skip_prefixes=tuple(tuple(x) for x in nidx.get("skip_prefixes", ())),
         max_dirs_to_visit=int(nidx.get("max_dirs_to_visit", 50_000)),
         enable_cache=bool(nidx.get("enable_cache", True)),
     )
 
-    out_dir = Path(out_dir_override) if out_dir_override else Path(dl.get("out_dir", "./out"))
-    dry_run = bool(dry_run_override) if dry_run_override is not None else bool(dl.get("dry_run", True))
+    out_dir = (
+        Path(out_dir_override) if out_dir_override else Path(dl.get("out_dir", "./out"))
+    )
+    dry_run = (
+        bool(dry_run_override)
+        if dry_run_override is not None
+        else bool(dl.get("dry_run", True))
+    )
 
     download = DownloadConfig(
         out_dir=out_dir,
@@ -95,17 +117,26 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="s2pipe")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    d = sub.add_parser("download", help="Run Step 1: download Sentinel-2 products + write manifest.")
+    d = sub.add_parser(
+        "download", help="Run Step 1: download Sentinel-2 products + write manifest."
+    )
     d.add_argument("--config", type=str, required=True, help="Path to YAML config.")
     d.add_argument("--out", type=str, default=None, help="Override output directory.")
     d.add_argument("--dry-run", action="store_true", help="Plan only; do not download.")
-    d.add_argument("--no-dry-run", dest="dry_run_off", action="store_true", help="Actually download.")
+    d.add_argument(
+        "--no-dry-run",
+        dest="dry_run_off",
+        action="store_true",
+        help="Actually download.",
+    )
     args = p.parse_args()
 
     if args.cmd == "download":
         cfg_dict = _load_yaml(Path(args.config))
         dry_override = True if args.dry_run else (False if args.dry_run_off else None)
-        cfg = _cfg_from_dict(cfg_dict, out_dir_override=args.out, dry_run_override=dry_override)
+        cfg = _cfg_from_dict(
+            cfg_dict, out_dir_override=args.out, dry_run_override=dry_override
+        )
 
         auth = prompt_auth()
         res = run_download(cfg, auth=auth)
