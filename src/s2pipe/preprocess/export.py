@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import numpy as np
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,7 +43,9 @@ def _atomic_write_json(path: Path, obj: dict[str, Any]) -> None:
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(obj, f, ensure_ascii=False, indent=2, sort_keys=False)
+            json.dump(
+                obj, f, ensure_ascii=False, indent=2, sort_keys=False, allow_nan=False
+            )
             f.write("\n")
         os.replace(tmp_path, path)
     finally:
@@ -57,7 +60,7 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
 
 
 def _get_s2pipe_version() -> str:
@@ -96,11 +99,43 @@ def _grid_to_meta(grid: RasterGrid) -> dict[str, Any]:
 
 def _raster_asset_info(r: Raster) -> dict[str, Any]:
     arr = r.to_chw()
+
+    # JSON must not contain NaN/Infinity. Preserve semantics via nodata_kind.
+    # - nodata_kind="none": nodata is not defined
+    # - nodata_kind="value": nodata is a concrete numeric (or other) value
+    # - nodata_kind="nan": nodata is represented by NaN in the raster values
+    nodata = r.nodata
+    nodata_kind = "none"
+    nodata_json: Any = None
+    if nodata is None:
+        nodata_kind = "none"
+        nodata_json = None
+    else:
+        # Typical for angle rasters: NaN indicates invalid pixels.
+        if isinstance(nodata, (float, np.floating)) and np.isnan(float(nodata)):
+            nodata_kind = "nan"
+            nodata_json = None
+        elif isinstance(nodata, (int, np.integer)):
+            nodata_kind = "value"
+            nodata_json = int(nodata)
+        elif isinstance(nodata, (np.number,)):
+            # Other numpy scalar types
+            nodata_kind = "value"
+            nodata_json = float(nodata)
+        elif isinstance(nodata, float):
+            nodata_kind = "value"
+            nodata_json = float(nodata)
+        else:
+            # Rare: non-numeric nodata (kept as-is, but still valid JSON)
+            nodata_kind = "value"
+            nodata_json = nodata
+
     info: dict[str, Any] = {
         "dtype": str(arr.dtype),
         "shape_chw": [int(arr.shape[0]), int(arr.shape[1]), int(arr.shape[2])],
         "grid": _grid_to_meta(r.grid),
-        "nodata": None if r.nodata is None else r.nodata,
+        "nodata": nodata_json,
+        "nodata_kind": nodata_kind,
     }
     if r.band_names is not None:
         info["band_names"] = list(r.band_names)
