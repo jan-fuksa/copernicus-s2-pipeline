@@ -1,33 +1,33 @@
-query:
-  tile_id: "33UWQ"
-  date_from_utc: "2025-12-01T00:00:00.000Z"
-  date_to_utc: "2025-12-15T00:00:00.000Z"
-  cloud_min: 10.0
-  cloud_max: 80.0
-  min_coverage_ratio: 0.8
-  top: 50               # must be <= 1000
-  include_attributes_in_hits: true
-  tile_area_m2: 1.21e10
-
-selection:
-  l1c_tile_metadata: true
-  l2a_scl_20m: true
-  l2a_tile_metadata: true
-
-nodes_index:
-  skip_dir_names: ["HTML", "rep_info", "DATASTRIP", "AUX_DATA", "QI_DATA"]
-  max_dirs_to_visit: 50000
-  enable_cache: true
-
 download:
-  out_dir: "./out"
-  overwrite: false
-  dry_run: true
+  query:
+    tile_id: "33UWQ"
+    date_from_utc: "2025-12-01T00:00:00.000Z"
+    date_to_utc: "2025-12-15T00:00:00.000Z"
+    cloud_min: 10.0
+    cloud_max: 80.0
+    min_coverage_ratio: 0.8
+    top: 50               # must be <= 1000
+    include_attributes_in_hits: true
 
-control:
-  max_pairs: 3
+  selection:
+    l1c_tile_metadata: true
+    l2a_scl_20m: true
+    l2a_tile_metadata: true
 
-manifest:
-  write_json: true
-  export_table: true
-  store_geofootprint: true
+  nodes_index:
+    skip_dir_names: ["HTML", "rep_info", "DATASTRIP", "AUX_DATA", "QI_DATA"]
+    max_dirs_to_visit: 50000
+    enable_cache: true
+
+  download:
+    out_dir: "./out"
+    overwrite: false
+    dry_run: true
+
+  control:
+    max_pairs: 3
+
+  manifest:
+    write_json: true
+    export_table: true
+    store_geofootprint: true
