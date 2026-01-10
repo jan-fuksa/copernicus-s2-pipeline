@@ -189,11 +189,14 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         for n in nodes_l1c:
             fn = n.parts[-1]
             dst = l1c_root / fn
-            role = (
-                "tile_metadata"
-                if fn == "MTD_TL.xml"
-                else ("band" if fn.lower().endswith(".jp2") else "file")
-            )
+            if fn == "MTD_TL.xml":
+                role = "tile_metadata"
+            elif fn == "MTD_MSIL1C.xml":
+                role = "product_metadata"
+            elif fn.lower().endswith(".jp2"):
+                role = "band"
+            else:
+                role = "file"
             band = None
             if role == "band":
                 # try to parse band suffix like "_B02.jp2"

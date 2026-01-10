@@ -24,6 +24,9 @@ def select_assets_l1c(
         if sel.l1c_tile_metadata and fn == "MTD_TL.xml":
             out.append(n)
             continue
+        if sel.l1c_tile_metadata and fn == "MTD_MSIL1C.xml":
+            out.append(n)
+            continue
 
         # JP2 bands: typical filename contains "_B02.jp2" etc.
         for b in want_bands:

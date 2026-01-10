@@ -36,10 +36,22 @@ class QueryConfig:
 class SelectionConfig:
     # L1C
     l1c_bands: Sequence[str] = (
-        "B01","B02","B03","B04","B05","B06",
-        "B07","B08","B8A","B09","B10","B11","B12"
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B06",
+        "B07",
+        "B08",
+        "B8A",
+        "B09",
+        "B10",
+        "B11",
+        "B12",
     )
     l1c_tile_metadata: bool = True
+    l1c_product_metadata: bool = True
 
     # L2A
     l2a_scl_20m: bool = True
@@ -50,7 +62,9 @@ class SelectionConfig:
 
 @dataclass(frozen=True)
 class NodesIndexConfig:
-    skip_dir_names: frozenset[str] = frozenset({"HTML", "rep_info", "DATASTRIP", "AUX_DATA", "QI_DATA"})
+    skip_dir_names: frozenset[str] = frozenset(
+        {"HTML", "rep_info", "DATASTRIP", "AUX_DATA", "QI_DATA"}
+    )
     skip_prefixes: Tuple[Tuple[str, ...], ...] = ()
     max_dirs_to_visit: int = 50_000
     enable_cache: bool = True
@@ -87,7 +101,7 @@ class ManifestConfig:
     table_csv_name: str = "manifest_table.csv"
     table_xlsx_name: str = "manifest_table.xlsx"
 
-    runs_dir: str = "runs"          # subdir under <out_dir>/meta/step1/
+    runs_dir: str = "runs"  # subdir under <out_dir>/meta/step1/
     index_name: str = "index.json"  # aggregated across runs (deduped)
 
     # Optional:
@@ -99,7 +113,9 @@ class PipelineConfig:
     query: QueryConfig
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     nodes_index: NodesIndexConfig = field(default_factory=NodesIndexConfig)
-    download: DownloadConfig = field(default_factory=lambda: DownloadConfig(out_dir=Path("./out")))
+    download: DownloadConfig = field(
+        default_factory=lambda: DownloadConfig(out_dir=Path("./out"))
+    )
     control: RunControlConfig = field(default_factory=RunControlConfig)
     manifest: ManifestConfig = field(default_factory=ManifestConfig)
 
