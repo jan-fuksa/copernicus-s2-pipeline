@@ -21,12 +21,25 @@ dist/
 build/
 *.egg-info/
 
+# ------- This may be later included in the project -----------
 # Project-generated outputs / temporary working directories
 out/
 
 # Project-specific directories (adjust if these should be versioned)
 tools/
-tests/fixtures/single_tile
 
 # Build scripts (keep tracked unless you explicitly want to ignore it)
 Makefile
+
+# -------------------  TEST FIXTURES --------------------------
+# Ignore everything under tests/fixtures by default
+/tests/fixtures/**
+
+# Allow Git to descend into the single_tile directory tree (any depth)
+!/tests/fixtures/single_tile/
+!/tests/fixtures/single_tile/**/
+
+# Allow only these files anywhere under single_tile (any depth)
+!/tests/fixtures/single_tile/**/MTD_TL.xml
+!/tests/fixtures/single_tile/**/index.json
+!/tests/fixtures/single_tile/**/*.jp2

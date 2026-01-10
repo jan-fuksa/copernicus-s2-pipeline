@@ -1,0 +1,131 @@
+{
+  "manifest_version": "1.0",
+  "created_utc": "2026-01-09T12:26:13Z",
+  "pipeline": {
+    "name": "s2pipe",
+    "stage": "download",
+    "stage_version": "1.0"
+  },
+  "query": {
+    "aggregate": true
+  },
+  "output": {
+    "out_dir": "tests/fixtures/single_tile",
+    "layout": "raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>"
+  },
+  "pairs": [
+    {
+      "key": {
+        "tile_id": "T33UWQ",
+        "sensing_start_utc": "2025-12-10T10:03:19Z"
+      },
+      "l1c": {
+        "product_id": "92574407-5142-4752-a012-775d91382a3b",
+        "product_name": "S2B_MSIL1C_20251210T100319_N0511_R122_T33UWQ_20251212T162649.SAFE",
+        "baseline": "N0511",
+        "rel_orbit": "R122",
+        "cloud_cover": 16.497864970587,
+        "geofootprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                14.999722922552591,
+                49.652722814505665
+              ],
+              [
+                14.999728378048822,
+                48.66503141156509
+              ],
+              [
+                16.49066964052278,
+                48.65538534877128
+              ],
+              [
+                16.520595653725128,
+                49.64273706516441
+              ],
+              [
+                14.999722922552591,
+                49.652722814505665
+              ]
+            ]
+          ]
+        },
+        "coverage_ratio": 0.996366942146806,
+        "scl_percentages": null
+      },
+      "l2a": {
+        "product_id": "c0f62c63-ea6d-4ba2-86e0-f662c9cfd8b8",
+        "product_name": "S2B_MSIL2A_20251210T100319_N0511_R122_T33UWQ_20251212T171501.SAFE",
+        "baseline": "N0511",
+        "rel_orbit": "R122",
+        "cloud_cover": null,
+        "geofootprint": null,
+        "coverage_ratio": null,
+        "scl_percentages": {
+          "CLOUDY_PIXEL_PERCENTAGE": 22.358648,
+          "CLOUDY_PIXEL_OVER_LAND_PERCENTAGE": 22.398537,
+          "DEGRADED_MSI_DATA_PERCENTAGE": 0.0057,
+          "NODATA_PIXEL_PERCENTAGE": 8.6e-05,
+          "SATURATED_DEFECTIVE_PIXEL_PERCENTAGE": 0.0,
+          "CAST_SHADOW_PERCENTAGE": 5.14145,
+          "CLOUD_SHADOW_PERCENTAGE": 0.024662,
+          "VEGETATION_PERCENTAGE": 28.317428,
+          "NOT_VEGETATED_PERCENTAGE": 43.332091,
+          "WATER_PERCENTAGE": 0.750924,
+          "UNCLASSIFIED_PERCENTAGE": 0.07071,
+          "MEDIUM_PROBA_CLOUDS_PERCENTAGE": 2.442446,
+          "HIGH_PROBA_CLOUDS_PERCENTAGE": 18.221232,
+          "THIN_CIRRUS_PERCENTAGE": 1.694969,
+          "SNOW_ICE_PERCENTAGE": 0.004088
+        }
+      },
+      "files_l1c": {
+        "root_dir": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files",
+        "items": [
+          {
+            "role": "tile_metadata",
+            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_TL.xml",
+            "band": null,
+            "planned": false,
+            "present": true
+          },
+          {
+            "role": "band",
+            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_B02.jp2",
+            "band": "B02",
+            "planned": false,
+            "present": true
+          },
+          {
+            "role": "band",
+            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_B01.jp2",
+            "band": "B01",
+            "planned": false,
+            "present": true
+          }
+        ]
+      },
+      "files_l2a": {
+        "root_dir": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files",
+        "items": [
+          {
+            "role": "tile_metadata",
+            "path": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_TL.xml",
+            "band": null,
+            "planned": false,
+            "present": true
+          },
+          {
+            "role": "scl_20m",
+            "path": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_SCL_20m.jp2",
+            "band": null,
+            "planned": false,
+            "present": true
+          }
+        ]
+      }
+    }
+  ]
+}
