@@ -41,5 +41,6 @@ Makefile
 
 # Allow only these files anywhere under single_tile (any depth)
 !/tests/fixtures/single_tile/**/MTD_TL.xml
+!/tests/fixtures/single_tile/**/MTD_MSIL1C.xml
 !/tests/fixtures/single_tile/**/index.json
 !/tests/fixtures/single_tile/**/*.jp2

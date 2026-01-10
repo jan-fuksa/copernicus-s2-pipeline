@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0",
-  "created_utc": "2026-01-09T12:26:13Z",
+  "created_utc": "2026-01-10T19:45:22Z",
   "pipeline": {
     "name": "s2pipe",
     "stage": "download",
@@ -84,6 +84,13 @@
       "files_l1c": {
         "root_dir": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files",
         "items": [
+          {
+            "role": "product_metadata",
+            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_MSIL1C.xml",
+            "band": null,
+            "planned": false,
+            "present": true
+          },
           {
             "role": "tile_metadata",
             "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_TL.xml",
