@@ -1,10 +1,10 @@
 # s2pipe — Sentinel-2 CDSE pipeline
 
-This repository contains **Step 1 (download)** of a multi-stage pipeline:
+This repository contains a multi-stage pipeline:
 
 - Step 1: Download (implemented)
 - Step 2: Preprocess to a training-ready format (implemented)
-- Step 3: Patch extraction and sharding (skeleton only)
+- Step 3: Patch extraction and sharding (not implemented)
 
 ## Install (editable)
 
