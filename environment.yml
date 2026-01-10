@@ -1,0 +1,29 @@
+name: copernicus-s2
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+
+  # Needed for actions/checkout + LFS fixtures inside a job container
+  - git
+  - git-lfs
+
+  # Project runtime deps (from pyproject.toml)
+  - requests
+  - tqdm
+  - shapely
+  - pyproj
+  - pandas
+  - openpyxl
+  - pyyaml
+  - numpy
+  - rasterio
+  - affine
+
+  # Test runner
+  - pytest
+
+  # Build tooling for "pip install -e ." (PEP 517 builds etc.)
+  - setuptools
+  - wheel
