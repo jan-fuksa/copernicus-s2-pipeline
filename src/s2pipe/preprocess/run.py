@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,6 @@ from .raster import (
     RasterGrid,
     grid_from_reference_raster,
     read_raster,
-    stack_rasters,
 )
 from .resample import resample_raster
 
@@ -38,6 +37,60 @@ class PreprocessResult:
     processed_count: int
     failed_count: int = 0
     skipped_count: int = 0
+
+
+@dataclass(frozen=True)
+class BuildXResult:
+    bands: np.ndarray  # (C,H,W) float32
+    valid_masks: np.ndarray  # (C,H,W) uint8 (0/1)
+    band_names: list[str]
+    grid: RasterGrid
+
+    def to_raster(self, cfg: PreprocessConfig) -> Raster:
+        """Convert bands + masks into a final export Raster (CC,H,W)."""
+        bands = np.asarray(self.bands, dtype=np.float32)
+        masks = np.asarray(self.valid_masks)
+
+        if bands.ndim != 3:
+            raise ValueError(
+                f"BuildXResult.bands must be (C,H,W), got shape={bands.shape}"
+            )
+        if masks.shape != bands.shape:
+            raise ValueError(
+                f"BuildXResult.valid_masks must match bands shape, "
+                f"got masks={masks.shape} vs bands={bands.shape}"
+            )
+
+        mask_names: list[str] = []
+        mask_layers: list[np.ndarray] = []
+
+        mode = str(cfg.valid_pixel_mask)
+        if mode == "all_in_one":
+            # AND across bands
+            m = np.all(masks.astype(bool), axis=0).astype(
+                np.float32, copy=False
+            )  # (H,W)
+            mask_layers = [m[np.newaxis, :, :]]  # (1,H,W)
+            mask_names = ["valid"]
+        elif mode == "per_band":
+            # One mask per band
+            m = masks.astype(np.float32, copy=False)  # (C,H,W)
+            mask_layers = [m]
+            mask_names = [f"valid_{b}" for b in self.band_names]
+        else:
+            raise ValueError(f"Invalid valid_pixel_mask: {mode!r}")
+
+        out = np.concatenate([bands] + mask_layers, axis=0).astype(
+            np.float32, copy=False
+        )
+        out_names = list(self.band_names) + mask_names
+
+        return Raster(
+            array=out,
+            grid=self.grid,
+            nodata=None,
+            band_names=out_names,
+        )
 
 
 def _utc_now_iso() -> str:
@@ -74,25 +127,53 @@ def _choose_target_grid_ref_path(assets: Any, cfg: PreprocessConfig) -> Path:
     return Path(assets.l1c_bands[ref])
 
 
-def _build_x(*, assets: Any, dst_grid: RasterGrid, cfg: PreprocessConfig) -> Raster:
-    rasters: list[Raster] = []
+def _build_x(
+    *, assets: Any, dst_grid: RasterGrid, cfg: PreprocessConfig
+) -> BuildXResult:
+    bands: list[np.ndarray] = []
+    masks: list[np.ndarray] = []
     names: list[str] = []
 
     for b in cfg.l1c_bands:
         p = Path(assets.l1c_bands[str(b)])
         r = read_raster(p)
-        r_w = resample_raster(r, dst_grid, method="bilinear", dst_nodata=0.0)
-        rasters.append(r_w)
+
+        # L1C convention: DN==0 means nodata. Enforce nodata=0 for correct resampling.
+        r0 = replace(r, nodata=0)
+
+        # Resample only if grids differ.
+        if r0.grid == dst_grid:
+            r_w = r0
+        else:
+            src_m = float(r0.grid.res_m)
+            dst_m = float(dst_grid.res_m)
+
+            if src_m < dst_m:
+                method = str(cfg.downsample_method)
+            elif src_m > dst_m:
+                method = str(cfg.upsample_method)
+            else:
+                # Same nominal resolution but different grid => treat as "upsample" strategy.
+                method = str(cfg.upsample_method)
+
+            r_w = resample_raster(r0, dst_grid, method=method, dst_nodata=0.0)
+
+        a = r_w.to_chw()[0]  # (H,W)
+        m = (a != 0).astype(np.uint8)  # valid=1, nodata=0 (computed after resampling)
+
+        bands.append(a.astype(np.float32, copy=False))
+        masks.append(m)
         names.append(str(b))
 
-    x = stack_rasters(rasters, band_names=names if names else None)
-    x = Raster(
-        array=x.to_chw().astype(np.float32, copy=False),
+    bands_chw = np.stack(bands, axis=0).astype(np.float32, copy=False)  # (C,H,W)
+    masks_chw = np.stack(masks, axis=0)  # (C,H,W) uint8
+
+    return BuildXResult(
+        bands=bands_chw,
+        valid_masks=masks_chw,
+        band_names=names,
         grid=dst_grid,
-        nodata=None,
-        band_names=names if names else None,
     )
-    return x
 
 
 def _build_y_and_label_stats(
@@ -166,6 +247,7 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
                 pair,
                 index,
                 l1c_bands=tuple(cfg.l1c_bands),
+                need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
                 need_l1c_tile_metadata=need_angles,
                 need_l2a_tile_metadata=False,
                 need_scl_20m=True,
@@ -175,7 +257,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
             ref_path = _choose_target_grid_ref_path(assets, cfg)
             dst_grid = grid_from_reference_raster(ref_path)
 
-            x = _build_x(assets=assets, dst_grid=dst_grid, cfg=cfg)
+            bx = _build_x(assets=assets, dst_grid=dst_grid, cfg=cfg)
+            x = bx.to_raster(cfg)
             y, label_stats = _build_y_and_label_stats(
                 assets=assets, dst_grid=dst_grid, cfg=cfg
             )
