@@ -25,6 +25,7 @@ from .raster import (
     read_raster,
 )
 from .resample import resample_raster
+from .radiometry import parse_l1c_radiometry
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +135,14 @@ def _build_x(
     masks: list[np.ndarray] = []
     names: list[str] = []
 
+    rad = None
+    if cfg.to_toa_reflectance:
+        if assets.l1c_product_metadata is None:
+            raise ValueError(
+                "Missing L1C product metadata (product_metadata) required for TOA reflectance."
+            )
+        rad = parse_l1c_radiometry(Path(assets.l1c_product_metadata))
+
     for b in cfg.l1c_bands:
         p = Path(assets.l1c_bands[str(b)])
         r = read_raster(p)
@@ -158,10 +167,16 @@ def _build_x(
 
             r_w = resample_raster(r0, dst_grid, method=method, dst_nodata=0.0)
 
-        a = r_w.to_chw()[0]  # (H,W)
-        m = (a != 0).astype(np.uint8)  # valid=1, nodata=0 (computed after resampling)
+        a_dn = r_w.to_chw()[0]  # uint16/float32 according to resampling
+        m = (a_dn != 0).astype(np.uint8)
 
-        bands.append(a.astype(np.float32, copy=False))
+        a = a_dn.astype(np.float32, copy=False)
+        if rad is not None:
+            offset, quant = rad.get_band_params(str(b))
+            valid = m.astype(bool)
+            a[valid] = (a[valid] + float(offset)) / float(quant)
+
+        bands.append(a)
         masks.append(m)
         names.append(str(b))
 
