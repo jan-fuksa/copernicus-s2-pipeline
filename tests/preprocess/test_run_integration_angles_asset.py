@@ -104,6 +104,10 @@ def test_step2_export_writes_angles_tif_and_records_it_in_meta_and_indexes(
         max_pairs=1,
         target_grid_ref="scl_20m",
         l1c_bands=(band,),
+        to_toa_reflectance=True,
+        upsample_method="bilinear",
+        downsample_method="average",
+        valid_pixel_mask="all_in_one",
         angles=AngleAssetConfig(
             enabled=True,
             include_sun=True,
@@ -142,7 +146,7 @@ def test_step2_export_writes_angles_tif_and_records_it_in_meta_and_indexes(
 
     # x.tif should contain ONLY the selected L1C bands
     with rasterio.open(x_path) as ds:
-        assert ds.count == 1
+        assert ds.count == 2
         assert ds.width > 0 and ds.height > 0
 
     # angles.tif should be coarse (typically ~23x23) and have expected channel count.
