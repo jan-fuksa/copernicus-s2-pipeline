@@ -106,6 +106,7 @@ class SelectedAssets:
 
     # L1C
     l1c_bands: dict[str, Path]  # band -> absolute path
+    l1c_product_metadata: Path | None  # MTD_MSIL1C.xml (optional)
     l1c_tile_metadata: Path | None  # MTD_TL.xml (optional)
 
     # L2A
@@ -352,6 +353,7 @@ def select_assets(
     index: DownloadIndex,
     *,
     l1c_bands: Sequence[str],
+    need_l1c_product_metadata: bool = False,
     need_l1c_tile_metadata: bool = True,
     need_l2a_tile_metadata: bool = False,
     need_scl_20m: bool = True,
@@ -376,6 +378,17 @@ def select_assets(
         raise FileNotFoundError(
             f"Missing required L1C bands for tile={pair.tile_id} sensing={pair.sensing_start_utc}: {missing_bands}"
         )
+
+    # Product-level metadata
+    l1c_prod_mtd: Path | None = None
+    if need_l1c_product_metadata:
+        it = _pick_single_item(
+            pair.files_l1c.items,
+            role="product_metadata",
+            band=None,
+            require_present=require_present,
+        )
+        l1c_prod_mtd = resolve_path(index, it.path)
 
     # Tile metadata
     l1c_mtd: Path | None = None
@@ -411,6 +424,7 @@ def select_assets(
 
     return SelectedAssets(
         l1c_bands=bands_out,
+        l1c_product_metadata=l1c_prod_mtd,
         l1c_tile_metadata=l1c_mtd,
         l2a_tile_metadata=l2a_mtd,
         scl_20m=scl_path,
@@ -418,84 +432,3 @@ def select_assets(
         coverage_ratio=pair.l1c.coverage_ratio,
         scl_percentages=pair.l2a.scl_percentages,
     )
-
-
-# ---------------------------------------------------------------------
-# Backwards-compatible wrappers (optional).
-# You may remove these once callers are migrated to select_assets().
-# ---------------------------------------------------------------------
-
-
-def select_l1c_band_paths(
-    pair: IndexPair,
-    index: DownloadIndex,
-    *,
-    bands: list[str],
-    require_present: bool = True,
-) -> dict[str, Path]:
-    return select_assets(
-        pair,
-        index,
-        l1c_bands=bands,
-        need_l1c_tile_metadata=False,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=False,
-        require_present=require_present,
-    ).l1c_bands
-
-
-def select_tile_metadata_path(
-    pair: IndexPair,
-    index: DownloadIndex,
-    *,
-    level: str,  # "L1C" | "L2A"
-    require_present: bool = True,
-) -> Path:
-    lvl = level.strip().upper()
-    if lvl == "L1C":
-        p = select_assets(
-            pair,
-            index,
-            l1c_bands=(),
-            need_l1c_tile_metadata=True,
-            need_l2a_tile_metadata=False,
-            need_scl_20m=False,
-            require_present=require_present,
-        ).l1c_tile_metadata
-        if p is None:
-            raise FileNotFoundError("Missing L1C tile_metadata")
-        return p
-    if lvl == "L2A":
-        p = select_assets(
-            pair,
-            index,
-            l1c_bands=(),
-            need_l1c_tile_metadata=False,
-            need_l2a_tile_metadata=True,
-            need_scl_20m=False,
-            require_present=require_present,
-        ).l2a_tile_metadata
-        if p is None:
-            raise FileNotFoundError("Missing L2A tile_metadata")
-        return p
-    raise ValueError(f"level must be 'L1C' or 'L2A', got: {level!r}")
-
-
-def select_scl_20m_path(
-    pair: IndexPair,
-    index: DownloadIndex,
-    *,
-    require_present: bool = True,
-) -> Path:
-    p = select_assets(
-        pair,
-        index,
-        l1c_bands=(),
-        need_l1c_tile_metadata=False,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=True,
-        require_present=require_present,
-    ).scl_20m
-    if p is None:
-        raise FileNotFoundError("Missing SCL_20m")
-    return p

@@ -39,6 +39,7 @@ def test_load_iter_select_assets():
                 "B01",
                 "B02",
             ],
+            need_l1c_product_metadata=True,
             need_l1c_tile_metadata=True,
             need_l2a_tile_metadata=True,
             need_scl_20m=True,
