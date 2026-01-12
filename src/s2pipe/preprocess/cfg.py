@@ -5,6 +5,21 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 
+ResampleMethod = Literal[
+    "nearest",
+    "bilinear",
+    "cubic",
+    "average",
+    "mode",
+    "max",
+    "min",
+    "med",
+    "q1",
+    "q3",
+    "sum",
+]
+
+
 @dataclass(frozen=True)
 class AngleAssetConfig:
     """Configuration for exporting Sentinel-2 angles as a separate Step-2 asset.
@@ -50,9 +65,29 @@ class LabelConfig:
 
 @dataclass(frozen=True)
 class NormalizeConfig:
-    mode: Literal["none", "compute_only", "apply_with_stats"] = "compute_only"
+    # Controls normalization behavior.
+    mode: Literal["none", "compute_only", "apply_with_stats"] = "none"
+
+    # Path to JSON stats. Required for "apply_with_stats". Optional for "compute_only"
+    # (a reasonable default can be derived from output_dir).
     stats_path: Path | None = None
+
+    # Percentile clipping applied before computing mean/std and before normalization.
+    # If None, clipping is disabled.
+    clip_percentiles: tuple[float, float] | None = (1.0, 99.0)
+
+    # Histogram settings used to estimate percentiles and moments at dataset scale.
+    hist_range: tuple[float, float] = (-0.2, 2.0)
+    hist_bin_width: float = 1e-4
+
+    # Optional per-scene subsampling for faster experimental runs.
+    # If None, all valid pixels are used. Otherwise, up to this many valid pixels
+    # are sampled PER BAND per scene.
     max_pixels_per_scene: int | None = None
+    seed: int = 0
+
+    # Optional diagnostics.
+    save_histograms: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +108,11 @@ class PreprocessConfig:
 
     # Features
     l1c_bands: Sequence[str] = ()  # e.g. ("B02","B03","B04","B08","B11","B12")
+    to_toa_reflectance: bool = True
+    upsample_method: ResampleMethod = "bilinear"
+    downsample_method: ResampleMethod = "average"
+    valid_pixel_mask: Literal["all_in_one", "per_band"] = "all_in_one"
+
     angles: AngleAssetConfig = field(default_factory=AngleAssetConfig)
     labels: LabelConfig = field(default_factory=LabelConfig)
     normalize: NormalizeConfig = field(default_factory=NormalizeConfig)
