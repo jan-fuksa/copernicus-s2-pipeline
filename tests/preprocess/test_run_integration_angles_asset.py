@@ -107,7 +107,7 @@ def test_step2_export_writes_angles_tif_and_records_it_in_meta_and_indexes(
         to_toa_reflectance=True,
         upsample_method="bilinear",
         downsample_method="average",
-        valid_pixel_mask="all_in_one",
+        valid_pixel_mask="single",
         angles=AngleAssetConfig(
             enabled=True,
             include_sun=True,
