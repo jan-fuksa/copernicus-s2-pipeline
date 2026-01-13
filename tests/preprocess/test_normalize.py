@@ -173,7 +173,7 @@ def test_stats_save_load_and_optional_npz(tmp_path: Path) -> None:
     stats_save(stats, stats_path, save_histograms=True, acc=acc)
 
     assert stats_path.exists()
-    assert stats_path.with_suffix(".npz").exists()
+    assert stats_path.with_name("histogram.npz").exists()
 
     loaded = stats_load(stats_path)
     assert loaded["schema"] == stats["schema"]
