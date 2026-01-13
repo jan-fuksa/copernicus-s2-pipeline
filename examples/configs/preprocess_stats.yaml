@@ -1,0 +1,46 @@
+preprocess:
+  index_json: "./out/meta/step1/index.json"
+  out_dir: "./out"
+  max_pairs: null
+  run_id: "stats_toa_v1"
+  target_grid_ref: "scl_20m"
+  l1c_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]
+
+  # Radiometry
+  to_toa_reflectance: true
+
+  # Resampling
+  upsample_method: "bilinear"
+  downsample_method: "average"
+
+  # Masks appended to x.tif
+  valid_pixel_mask: "single"
+
+  angles:
+    enabled: false
+    include_sun: true
+    include_view: true
+    encode: "sin_cos"
+    view_mode: "per_band"
+    view_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]
+    detector_aggregate: "nanmean"
+    output_name: "angles.tif"
+
+  labels:
+    ignore_index: 255
+    resample: "nearest"
+    mapping: null
+    src_value_range: 256
+
+  normalize:
+    # Pass 1: compute dataset stats (writes stats.json and optionally stats.npz)
+    mode: "compute_only"
+    stats_path: "./out/normalize/stats.json"
+    clip_percentiles: [1.0, 99.0]
+    hist_range: [-0.2, 2.0]
+    hist_bin_width: 0.0001
+    max_pixels_per_scene: null
+    seed: 0
+    save_histograms: true
+
+  num_workers: 0

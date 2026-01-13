@@ -1,10 +1,20 @@
 preprocess:
   index_json: "./out/meta/step1/index.json"
   out_dir: "./out"
-  max_pairs: 10
-  run_id: "exemplary_run_01"
+  max_pairs: null
+  run_id: "apply_toa_norm_v1"
   target_grid_ref: "scl_20m"
   l1c_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]
+
+  # Radiometry
+  to_toa_reflectance: true
+
+  # Resampling
+  upsample_method: "bilinear"
+  downsample_method: "average"
+
+  # Masks appended to x.tif
+  valid_pixel_mask: "single"
 
   angles:
     enabled: true
@@ -23,8 +33,14 @@ preprocess:
     src_value_range: 256
 
   normalize:
-    mode: "none"
-    stats_path: null
+    # Pass 2: apply stats and write normalized tiles
+    mode: "apply_with_stats"
+    stats_path: "./out/normalize/stats.json"
+    clip_percentiles: [1.0, 99.0]
+    hist_range: [-0.2, 2.0]
+    hist_bin_width: 0.0001
     max_pixels_per_scene: null
+    seed: 0
+    save_histograms: false
 
   num_workers: 0
