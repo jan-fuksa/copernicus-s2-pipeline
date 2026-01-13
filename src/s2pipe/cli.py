@@ -360,6 +360,20 @@ def _preprocess_cfg_from_dict(
     max_pairs_override: int | None = None,
     run_id_override: str | None = None,
     num_workers_override: int | None = None,
+    # CLI overrides (optional)
+    to_toa_reflectance_override: bool | None = None,
+    upsample_method_override: str | None = None,
+    downsample_method_override: str | None = None,
+    valid_pixel_mask_override: str | None = None,
+    normalize_mode_override: str | None = None,
+    normalize_stats_path_override: str | None = None,
+    save_histograms_override: bool | None = None,
+    max_pixels_per_scene_override: int | None = None,
+    clip_percentiles_override: tuple[float, float] | None = None,
+    no_clip_override: bool = False,
+    hist_range_override: tuple[float, float] | None = None,
+    hist_bin_width_override: float | None = None,
+    norm_seed_override: int | None = None,
 ) -> PreprocessConfig:
     """
     Required YAML shape for Step 2 (preprocess):
@@ -384,6 +398,51 @@ def _preprocess_cfg_from_dict(
     angles_d = pd.get("angles", {}) or {}
     labels_d = pd.get("labels", {}) or {}
     norm_d = pd.get("normalize", {}) or {}
+
+    # Preprocess feature toggles and methods
+    to_toa_reflectance = (
+        bool(to_toa_reflectance_override)
+        if to_toa_reflectance_override is not None
+        else bool(
+            pd.get(
+                "to_toa_reflectance",
+                _field_default_or_missing(PreprocessConfig, "to_toa_reflectance"),
+            )
+        )
+    )
+
+    upsample_method = (
+        str(upsample_method_override)
+        if upsample_method_override is not None
+        else str(
+            pd.get(
+                "upsample_method",
+                _field_default_or_missing(PreprocessConfig, "upsample_method"),
+            )
+        )
+    )
+
+    downsample_method = (
+        str(downsample_method_override)
+        if downsample_method_override is not None
+        else str(
+            pd.get(
+                "downsample_method",
+                _field_default_or_missing(PreprocessConfig, "downsample_method"),
+            )
+        )
+    )
+
+    valid_pixel_mask = (
+        str(valid_pixel_mask_override)
+        if valid_pixel_mask_override is not None
+        else str(
+            pd.get(
+                "valid_pixel_mask",
+                _field_default_or_missing(PreprocessConfig, "valid_pixel_mask"),
+            )
+        )
+    )
 
     # Default instances (from PreprocessConfig defaults/factories). If those fields have no defaults,
     # _field_default_or_missing will return MISSING and we will require explicit YAML keys below.
@@ -438,17 +497,93 @@ def _preprocess_cfg_from_dict(
         ),
     )
 
+    # NormalizeConfig
     stats_path_raw = norm_d.get("stats_path", norm_default.stats_path)
+    if normalize_stats_path_override is not None:
+        stats_path_raw = normalize_stats_path_override
+
     max_pixels_raw = norm_d.get(
         "max_pixels_per_scene", norm_default.max_pixels_per_scene
     )
+    if max_pixels_per_scene_override is not None:
+        max_pixels_raw = max_pixels_per_scene_override
+
+    # Percentile clipping
+    if no_clip_override:
+        clip_percentiles = None
+    elif clip_percentiles_override is not None:
+        clip_percentiles = (
+            float(clip_percentiles_override[0]),
+            float(clip_percentiles_override[1]),
+        )
+    else:
+        clip_percentiles_raw = norm_d.get(
+            "clip_percentiles", getattr(norm_default, "clip_percentiles", None)
+        )
+        if clip_percentiles_raw is None:
+            clip_percentiles = None
+        else:
+            if (
+                not isinstance(clip_percentiles_raw, (list, tuple))
+                or len(clip_percentiles_raw) != 2
+            ):
+                raise TypeError(
+                    "normalize.clip_percentiles must be a 2-item list/tuple (e.g. [1.0, 99.0]) or null."
+                )
+            clip_percentiles = (
+                float(clip_percentiles_raw[0]),
+                float(clip_percentiles_raw[1]),
+            )
+
+    # Histogram settings
+    if hist_range_override is not None:
+        hist_range = (float(hist_range_override[0]), float(hist_range_override[1]))
+    else:
+        hist_range_raw = norm_d.get(
+            "hist_range", getattr(norm_default, "hist_range", (-0.2, 2.0))
+        )
+        if not isinstance(hist_range_raw, (list, tuple)) or len(hist_range_raw) != 2:
+            raise TypeError(
+                "normalize.hist_range must be a 2-item list/tuple (e.g. [-0.2, 2.0])."
+            )
+        hist_range = (float(hist_range_raw[0]), float(hist_range_raw[1]))
+
+    if hist_bin_width_override is not None:
+        hist_bin_width = float(hist_bin_width_override)
+    else:
+        hist_bin_width = float(
+            norm_d.get("hist_bin_width", getattr(norm_default, "hist_bin_width", 1e-4))
+        )
+
+    if norm_seed_override is not None:
+        seed = int(norm_seed_override)
+    else:
+        seed = int(norm_d.get("seed", getattr(norm_default, "seed", 0)))
+
+    if save_histograms_override is not None:
+        save_histograms = bool(save_histograms_override)
+    else:
+        save_histograms = bool(
+            norm_d.get(
+                "save_histograms", getattr(norm_default, "save_histograms", False)
+            )
+        )
+
+    mode_val = str(norm_d.get("mode", norm_default.mode))
+    if normalize_mode_override is not None:
+        mode_val = str(normalize_mode_override)
 
     normalize_cfg = NormalizeConfig(
-        mode=str(norm_d.get("mode", norm_default.mode)),
+        mode=mode_val,
         stats_path=Path(str(stats_path_raw)) if stats_path_raw is not None else None,
+        clip_percentiles=clip_percentiles,
+        hist_range=hist_range,
+        hist_bin_width=hist_bin_width,
         max_pixels_per_scene=int(max_pixels_raw)
         if max_pixels_raw is not None
         else None,
+        seed=seed,
+        save_histograms=save_histograms,
     )
 
     max_pairs = (
@@ -490,6 +625,10 @@ def _preprocess_cfg_from_dict(
                 "l1c_bands", _field_default_or_missing(PreprocessConfig, "l1c_bands")
             )
         ),
+        to_toa_reflectance=to_toa_reflectance,
+        upsample_method=upsample_method,
+        downsample_method=downsample_method,
+        valid_pixel_mask=valid_pixel_mask,
         angles=angles_cfg,
         labels=labels_cfg,
         normalize=normalize_cfg,
@@ -501,6 +640,22 @@ def _preprocess_cfg_from_dict(
 def main() -> None:
     p = argparse.ArgumentParser(prog="s2pipe")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    _RESAMPLE_METHOD_CHOICES = [
+        "nearest",
+        "bilinear",
+        "cubic",
+        "average",
+        "mode",
+        "max",
+        "min",
+        "med",
+        "q1",
+        "q3",
+        "sum",
+    ]
+    _VALID_PIXEL_MASK_CHOICES = ["single", "per_band"]
+    _NORMALIZE_MODE_CHOICES = ["none", "compute_only", "apply_with_stats"]
 
     d = sub.add_parser(
         "download", help="Run Step 1: download Sentinel-2 products and write manifests."
@@ -532,6 +687,122 @@ def main() -> None:
         help="Override number of workers (reserved; pipeline is currently sequential).",
     )
 
+    # High-leverage preprocess overrides
+    toa = pp.add_mutually_exclusive_group()
+    toa.add_argument(
+        "--toa",
+        dest="to_toa_reflectance",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Convert L1C DN to TOA reflectance using product metadata.",
+    )
+    toa.add_argument(
+        "--no-toa",
+        dest="to_toa_reflectance",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Do not convert L1C DN to TOA reflectance.",
+    )
+
+    pp.add_argument(
+        "--upsample-method",
+        type=str,
+        default=None,
+        choices=_RESAMPLE_METHOD_CHOICES,
+        help="Resampling method used when upsampling to the target grid.",
+    )
+    pp.add_argument(
+        "--downsample-method",
+        type=str,
+        default=None,
+        choices=_RESAMPLE_METHOD_CHOICES,
+        help="Resampling method used when downsampling to the target grid.",
+    )
+    pp.add_argument(
+        "--valid-pixel-mask",
+        type=str,
+        default=None,
+        choices=_VALID_PIXEL_MASK_CHOICES,
+        help="How valid pixel masks are stored in x.tif (single or per_band).",
+    )
+
+    pp.add_argument(
+        "--normalize-mode",
+        type=str,
+        default=None,
+        choices=_NORMALIZE_MODE_CHOICES,
+        help="Normalization mode: none | compute_only | apply_with_stats.",
+    )
+    pp.add_argument(
+        "--normalize-stats-path",
+        type=str,
+        default=None,
+        help="Path to normalization stats.json used for compute/apply modes.",
+    )
+
+    sh = pp.add_mutually_exclusive_group()
+    sh.add_argument(
+        "--save-histograms",
+        dest="save_histograms",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Save histogram.npz next to stats.json when computing stats.",
+    )
+    sh.add_argument(
+        "--no-save-histograms",
+        dest="save_histograms",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Do not save histogram.npz when computing stats.",
+    )
+
+    pp.add_argument(
+        "--max-pixels-per-scene",
+        type=int,
+        default=None,
+        help="Limit the number of valid pixels sampled per scene when computing stats.",
+    )
+
+    clip = pp.add_mutually_exclusive_group()
+    clip.add_argument(
+        "--clip-percentiles",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("P_LO", "P_HI"),
+        help="Percentile clipping applied before moments, e.g. --clip-percentiles 1.0 99.0.",
+    )
+    clip.add_argument(
+        "--no-clip",
+        action="store_true",
+        help="Disable percentile clipping during normalization.",
+    )
+
+    pp.add_argument(
+        "--hist-range",
+        nargs=2,
+        type=float,
+        default=None,
+        metavar=("LOW", "HIGH"),
+        help="Histogram range used to compute dataset statistics, e.g. --hist-range -0.2 2.0.",
+    )
+    pp.add_argument(
+        "--hist-bin-width",
+        type=float,
+        default=None,
+        help="Histogram bin width used to compute dataset statistics (e.g. 0.0001).",
+    )
+    pp.add_argument(
+        "--norm-seed",
+        type=int,
+        default=None,
+        help="Random seed used for subsampling when computing stats.",
+    )
+
     args = p.parse_args()
 
     if args.cmd == "download":
@@ -559,6 +830,31 @@ def main() -> None:
             max_pairs_override=args.max_pairs,
             run_id_override=args.run_id,
             num_workers_override=args.num_workers,
+            to_toa_reflectance_override=args.to_toa_reflectance,
+            upsample_method_override=args.upsample_method,
+            downsample_method_override=args.downsample_method,
+            valid_pixel_mask_override=args.valid_pixel_mask,
+            normalize_mode_override=args.normalize_mode,
+            normalize_stats_path_override=args.normalize_stats_path,
+            save_histograms_override=args.save_histograms,
+            max_pixels_per_scene_override=args.max_pixels_per_scene,
+            clip_percentiles_override=(
+                (float(args.clip_percentiles[0]), float(args.clip_percentiles[1]))
+                if args.clip_percentiles is not None
+                else None
+            ),
+            no_clip_override=bool(args.no_clip),
+            hist_range_override=(
+                (float(args.hist_range[0]), float(args.hist_range[1]))
+                if args.hist_range is not None
+                else None
+            ),
+            hist_bin_width_override=(
+                float(args.hist_bin_width) if args.hist_bin_width is not None else None
+            ),
+            norm_seed_override=(
+                int(args.norm_seed) if args.norm_seed is not None else None
+            ),
         )
         res = run_preprocess(cfg)
         print(f"Run ID: {res.run_id}")
