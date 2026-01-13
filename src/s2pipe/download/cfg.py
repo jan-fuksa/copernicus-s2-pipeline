@@ -28,7 +28,7 @@ class QueryConfig:
     # Expand Attributes when you want to *read* cloudCover value (not only filter by it).
     include_attributes_in_hits: bool = True
 
-    # Coverage area model for "tile area" (defaults to 110x110 km as used in your notebook).
+    # Coverage area model for "tile area" (defaults to 110km x 110km).
     tile_area_m2: float = 1.21e10
 
 
@@ -97,7 +97,7 @@ class ManifestConfig:
     write_json: bool = True
     json_name: str = "manifest.json"
 
-    export_table: bool = True
+    export_table: bool = False
     table_csv_name: str = "manifest_table.csv"
     table_xlsx_name: str = "manifest_table.xlsx"
 
