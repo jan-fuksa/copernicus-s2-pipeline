@@ -266,7 +266,7 @@ def stats_save(
             raise ValueError(
                 "save_histograms=True requires providing the histogram accumulator (acc)."
             )
-        npz_path = path.with_suffix(".npz")
+        npz_path = path.with_name("histogram.npz")
         np.savez_compressed(
             npz_path,
             schema=_STATS_SCHEMA,
