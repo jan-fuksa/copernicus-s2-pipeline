@@ -26,6 +26,16 @@ from .raster import (
 )
 from .resample import resample_raster
 from .radiometry import parse_l1c_radiometry
+from .normalize import (
+    HistogramAccumulator,
+    apply_stats_to_bands,
+    hist_init,
+    hist_update,
+    stats_finalize_from_hist,
+    stats_load,
+    stats_save,
+    validate_stats,
+)
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +136,13 @@ def _choose_target_grid_ref_path(assets: Any, cfg: PreprocessConfig) -> Path:
             f"target_grid_ref={ref!r} not found among selected L1C bands: {sorted(assets.l1c_bands.keys())}"
         )
     return Path(assets.l1c_bands[ref])
+
+
+def _resolve_stats_path(cfg: PreprocessConfig, out_dir: Path) -> Path:
+    """Resolve stats.json path for normalization."""
+    if cfg.normalize.stats_path is not None:
+        return Path(cfg.normalize.stats_path)
+    return Path(out_dir) / "normalize" / "stats.json"
 
 
 def _build_x(
@@ -236,7 +253,7 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
       6) optionally build coarse-grid angles asset (angles.tif)
       7) export x/y/meta (+ extra assets) and update run manifest + global Step-2 index.json
 
-    Note: normalization (streaming mean/std) is not implemented yet.
+    Note: normalization behavior is controlled by cfg.normalize.mode ("none" | "compute_only" | "apply_with_stats").
     """
     index = load_download_index(cfg.index_json)
     out_dir = Path(cfg.out_dir).resolve()
@@ -245,11 +262,88 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
     run_manifest_path = out_dir / "meta" / "step2" / "runs" / f"run={run_id}.jsonl"
     step2_index_path = out_dir / "meta" / "step2" / "index.json"
 
+    norm_mode = str(cfg.normalize.mode)
+    stats_path = _resolve_stats_path(cfg, out_dir)
+
     processed = 0
     failed = 0
     skipped = 0
 
     need_angles = bool(cfg.angles.enabled)
+
+    if norm_mode == "compute_only":
+        acc: HistogramAccumulator = hist_init(list(cfg.l1c_bands), cfg.normalize)
+
+        for i, pair in enumerate(index.pairs):
+            if cfg.max_pairs is not None and i >= int(cfg.max_pairs):
+                break
+
+            try:
+                # For stats-only run we do not need angles metadata.
+                assets = select_assets(
+                    pair,
+                    index,
+                    l1c_bands=tuple(cfg.l1c_bands),
+                    need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
+                    need_l1c_tile_metadata=False,
+                    need_l2a_tile_metadata=False,
+                    need_scl_20m=True,
+                    require_present=True,
+                )
+
+                ref_path = _choose_target_grid_ref_path(assets, cfg)
+                dst_grid = grid_from_reference_raster(ref_path)
+
+                bx = _build_x(assets=assets, dst_grid=dst_grid, cfg=cfg)
+
+                hist_update(
+                    acc,
+                    bx.bands,
+                    bx.valid_masks,
+                    max_pixels_per_scene=cfg.normalize.max_pixels_per_scene,
+                )
+
+            except Exception as e:
+                acc.scenes_skipped += 1
+                log.warning(
+                    "Skipping scene in compute_only mode: tile=%s sensing=%s error=%s",
+                    pair.tile_id,
+                    pair.sensing_start_utc,
+                    str(e),
+                )
+                continue
+
+        stats = stats_finalize_from_hist(acc, cfg.normalize)
+        # Persist preprocessing-relevant metadata for validation on apply.
+        stats["to_toa_reflectance"] = bool(cfg.to_toa_reflectance)
+
+        stats_save(
+            stats,
+            stats_path,
+            save_histograms=bool(cfg.normalize.save_histograms),
+            acc=acc,
+        )
+
+        log.info("Saved normalization stats: %s", stats_path)
+
+        return PreprocessResult(
+            run_id=run_id,
+            run_manifest_path=run_manifest_path,
+            step2_index_path=step2_index_path,
+            processed_count=0,
+            failed_count=0,
+            skipped_count=int(acc.scenes_skipped),
+        )
+
+    stats: dict[str, Any] | None = None
+    if norm_mode == "apply_with_stats":
+        stats = stats_load(stats_path)
+        validate_stats(
+            stats,
+            band_names=list(cfg.l1c_bands),
+            cfg=cfg.normalize,
+            to_toa_reflectance=bool(cfg.to_toa_reflectance),
+        )
 
     for i, pair in enumerate(index.pairs):
         if cfg.max_pairs is not None and i >= int(cfg.max_pairs):
@@ -273,7 +367,21 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
             dst_grid = grid_from_reference_raster(ref_path)
 
             bx = _build_x(assets=assets, dst_grid=dst_grid, cfg=cfg)
+            if stats is not None:
+                bands_norm = apply_stats_to_bands(
+                    bx.bands,
+                    bx.valid_masks,
+                    bx.band_names,
+                    stats,
+                )
+                bx = BuildXResult(
+                    bands=bands_norm,
+                    valid_masks=bx.valid_masks,
+                    band_names=bx.band_names,
+                    grid=bx.grid,
+                )
             x = bx.to_raster(cfg)
+
             y, label_stats = _build_y_and_label_stats(
                 assets=assets, dst_grid=dst_grid, cfg=cfg
             )
