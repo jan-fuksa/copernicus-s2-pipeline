@@ -76,7 +76,7 @@ class BuildXResult:
         mask_layers: list[np.ndarray] = []
 
         mode = str(cfg.valid_pixel_mask)
-        if mode == "all_in_one":
+        if mode == "single":
             # AND across bands
             m = np.all(masks.astype(bool), axis=0).astype(
                 np.float32, copy=False

@@ -111,7 +111,7 @@ class PreprocessConfig:
     to_toa_reflectance: bool = True
     upsample_method: ResampleMethod = "bilinear"
     downsample_method: ResampleMethod = "average"
-    valid_pixel_mask: Literal["all_in_one", "per_band"] = "all_in_one"
+    valid_pixel_mask: Literal["single", "per_band"] = "single"
 
     angles: AngleAssetConfig = field(default_factory=AngleAssetConfig)
     labels: LabelConfig = field(default_factory=LabelConfig)

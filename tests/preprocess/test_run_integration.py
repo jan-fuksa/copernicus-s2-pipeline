@@ -371,7 +371,7 @@ def test_run_preprocess_normalize_apply_with_stats_exports_normalized_x(
         index_json=index_json, out_dir=out_dir, run_id="pytest_norm_apply", band=band
     )
     cfg2 = _with_normalize(cfg2, mode="apply_with_stats", stats_path=stats_path)
-    cfg2 = _with_valid_pixel_mask(cfg2, "all_in_one")
+    cfg2 = _with_valid_pixel_mask(cfg2, "single")
 
     run_preprocess(cfg2)
 
