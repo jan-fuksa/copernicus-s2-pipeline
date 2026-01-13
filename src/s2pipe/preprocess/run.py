@@ -328,8 +328,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
         return PreprocessResult(
             run_id=run_id,
-            run_manifest_path=run_manifest_path,
-            step2_index_path=step2_index_path,
+            run_manifest_path=run_manifest_path if run_manifest_path.exists() else None,
+            step2_index_path=step2_index_path if step2_index_path.exists() else None,
             processed_count=0,
             failed_count=0,
             skipped_count=int(acc.scenes_skipped),
@@ -489,8 +489,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
     return PreprocessResult(
         run_id=run_id,
-        run_manifest_path=run_manifest_path,
-        step2_index_path=step2_index_path,
+        run_manifest_path=run_manifest_path if run_manifest_path.exists() else None,
+        step2_index_path=step2_index_path if step2_index_path.exists() else None,
         processed_count=processed,
         failed_count=failed,
         skipped_count=skipped,
