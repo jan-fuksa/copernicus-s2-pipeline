@@ -19,7 +19,9 @@ def make_paths(out_dir: Path) -> OutputPaths:
     raw_l2a = root / "raw" / "L2A"
     manifest_dir = root / "meta" / "step1"
     tmp = root / "tmp"
-    return OutputPaths(root=root, raw_l1c=raw_l1c, raw_l2a=raw_l2a, manifest_dir=manifest_dir, tmp=tmp)
+    return OutputPaths(
+        root=root, raw_l1c=raw_l1c, raw_l2a=raw_l2a, manifest_dir=manifest_dir, tmp=tmp
+    )
 
 
 def ensure_dirs(paths: OutputPaths) -> None:

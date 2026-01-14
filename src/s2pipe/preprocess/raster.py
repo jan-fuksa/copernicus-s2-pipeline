@@ -77,7 +77,9 @@ class Raster:
         raise ValueError(f"Unsupported array ndim={a.ndim}.")
 
 
-def build_target_grid(*, tile_id: str, target_res_m: int, target_crs: str | None = None) -> RasterGrid:
+def build_target_grid(
+    *, tile_id: str, target_res_m: int, target_crs: str | None = None
+) -> RasterGrid:
     """Derive a target CRS/grid for the tile and requested resolution.
 
     Intentionally not implemented: robust derivation from tile_id alone requires an MGRS/tile-extent utility.
@@ -137,9 +139,9 @@ def read_raster(path: Path) -> Raster:
 
         nodata = ds.nodata
         if ds.count == 1:
-            arr = ds.read(1)   # (H, W)
+            arr = ds.read(1)  # (H, W)
         else:
-            arr = ds.read()    # (C, H, W)
+            arr = ds.read()  # (C, H, W)
 
     return Raster(array=arr, grid=grid, nodata=nodata)
 
@@ -200,7 +202,9 @@ def iter_windows(path: Path, *, blocksize: int = 1024) -> Iterator[Window]:
                 yield Window(col_off=col_off, row_off=row_off, width=w, height=h)
 
 
-def read_window(path: Path, window: Window, *, indexes: int | list[int] | None = None) -> np.ndarray:
+def read_window(
+    path: Path, window: Window, *, indexes: int | list[int] | None = None
+) -> np.ndarray:
     """Read a window from a raster.
 
     Returns:
@@ -232,7 +236,9 @@ def assert_same_grid(grids: Sequence[RasterGrid]) -> None:
             raise ValueError("Grids are not identical; cannot stack/merge safely.")
 
 
-def stack_rasters(rasters: Sequence[Raster], *, band_names: list[str] | None = None) -> Raster:
+def stack_rasters(
+    rasters: Sequence[Raster], *, band_names: list[str] | None = None
+) -> Raster:
     """Stack rasters along channel axis, returning a multi-band Raster (C,H,W).
 
     Inputs may be 2D (H,W) or 3D; all are normalized via to_chw().

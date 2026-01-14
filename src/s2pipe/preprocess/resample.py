@@ -27,7 +27,9 @@ _RESAMPLING_MAP: dict[str, Resampling] = {
 def _normalize_method(method: str) -> Resampling:
     m = (method or "").strip().lower()
     if m not in _RESAMPLING_MAP:
-        raise ValueError(f"Unsupported resample method={method!r}. Supported: {sorted(_RESAMPLING_MAP.keys())}")
+        raise ValueError(
+            f"Unsupported resample method={method!r}. Supported: {sorted(_RESAMPLING_MAP.keys())}"
+        )
     return _RESAMPLING_MAP[m]
 
 
@@ -42,7 +44,9 @@ def _as_chw_if_3d(arr: np.ndarray, grid: RasterGrid) -> np.ndarray:
     # HWC?
     if arr.shape[0] == H and arr.shape[1] == W:
         return np.transpose(arr, (2, 0, 1))
-    raise ValueError(f"Cannot infer channel axis for array shape {arr.shape} and grid (H,W)=({H},{W}).")
+    raise ValueError(
+        f"Cannot infer channel axis for array shape {arr.shape} and grid (H,W)=({H},{W})."
+    )
 
 
 def _resample_to_grid(
@@ -72,7 +76,7 @@ def _resample_to_grid(
         arr = arr.filled(fill)
 
     arr = np.asarray(arr)
-    input_was_2d = (arr.ndim == 2)
+    input_was_2d = arr.ndim == 2
 
     if arr.ndim == 3:
         arr = _as_chw_if_3d(arr, src_grid)
@@ -88,7 +92,11 @@ def _resample_to_grid(
 
     # For interpolating resampling on integer inputs, prefer float32 output.
     src_dtype = np.asarray(src_bands[0]).dtype
-    if resampling in {Resampling.bilinear, Resampling.cubic, Resampling.average} and np.issubdtype(src_dtype, np.integer):
+    if resampling in {
+        Resampling.bilinear,
+        Resampling.cubic,
+        Resampling.average,
+    } and np.issubdtype(src_dtype, np.integer):
         dst_dtype = np.float32
     else:
         dst_dtype = src_dtype

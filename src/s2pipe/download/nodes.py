@@ -31,7 +31,9 @@ def node_value_url(product_id: str, parts: Sequence[str]) -> str:
 _NODES_INDEX_CACHE: dict[str, list[NodeEntry]] = {}
 
 
-def list_nodes(client: CDSEHttpClient, product_id: str, parts: Optional[Sequence[str]] = None) -> list[dict[str, Any]]:
+def list_nodes(
+    client: CDSEHttpClient, product_id: str, parts: Optional[Sequence[str]] = None
+) -> list[dict[str, Any]]:
     url = nodes_url(product_id, parts)
     js = client.get_json(url)
 
@@ -39,9 +41,13 @@ def list_nodes(client: CDSEHttpClient, product_id: str, parts: Optional[Sequence
     if items is None:
         items = js.get("value")
     if items is None:
-        raise RuntimeError(f"Unexpected Nodes listing schema at {url}: keys={list(js.keys())}")
+        raise RuntimeError(
+            f"Unexpected Nodes listing schema at {url}: keys={list(js.keys())}"
+        )
     if not isinstance(items, list):
-        raise RuntimeError(f"Unexpected Nodes listing payload at {url}: type(items)={type(items)}")
+        raise RuntimeError(
+            f"Unexpected Nodes listing payload at {url}: type(items)={type(items)}"
+        )
     return items
 
 
@@ -76,7 +82,9 @@ def index_product_nodes(
             continue
         visited.add(parent_parts)
 
-        children = list_nodes(client, product_id, parent_parts if parent_parts else None)
+        children = list_nodes(
+            client, product_id, parent_parts if parent_parts else None
+        )
 
         for item in children:
             name = item.get("Name") or item.get("Id")
@@ -88,7 +96,7 @@ def index_product_nodes(
             children_num = item.get("ChildrenNumber")
 
             if isinstance(content_len, int):
-                is_dir = (content_len == 0)
+                is_dir = content_len == 0
             else:
                 is_dir = isinstance(children_num, int) and children_num > 0
 

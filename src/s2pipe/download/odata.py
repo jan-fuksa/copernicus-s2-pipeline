@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Optional, Sequence
 from urllib.parse import quote
 
 from shapely.geometry import shape
@@ -71,7 +71,9 @@ def baseline_to_int(baseline: str) -> int:
 
 def choose_best_product_by_name(products: Sequence[ProductHit]) -> ProductHit:
     parsed = [(p, parse_safe_name(p.name)) for p in products]
-    parsed.sort(key=lambda x: (baseline_to_int(x[1].baseline), x[1].discriminator), reverse=True)
+    parsed.sort(
+        key=lambda x: (baseline_to_int(x[1].baseline), x[1].discriminator), reverse=True
+    )
     return parsed[0][0]
 
 
@@ -208,11 +210,13 @@ def _utm_epsg_from_mgrs_tile(tile_id: str) -> int:
         tile_id = tile_id[1:]
     zone = int(tile_id[:2])
     band = tile_id[2].upper()
-    north = (band >= "N")
+    north = band >= "N"
     return (32600 + zone) if north else (32700 + zone)
 
 
-def coverage_ratio_from_geofootprint(geofootprint: Optional[dict], tile_id: str, tile_area_m2: float) -> float:
+def coverage_ratio_from_geofootprint(
+    geofootprint: Optional[dict], tile_id: str, tile_area_m2: float
+) -> float:
     if not geofootprint:
         return 0.0
 
@@ -256,22 +260,34 @@ def search_products_odata(
 
             try:
                 ps = parse_safe_name(name)
-                cov = coverage_ratio_from_geofootprint(geo, ps.tile_id, tile_area_m2=tile_area_m2)
+                cov = coverage_ratio_from_geofootprint(
+                    geo, ps.tile_id, tile_area_m2=tile_area_m2
+                )
             except Exception:
                 cov = 0.0
 
             if cov < min_coverage_ratio:
                 continue
 
-            out.append(ProductHit(
-                cdse_id=str(it["Id"]),
-                name=name,
-                start=str(it.get("ContentDate", {}).get("Start", it.get("ContentDate/Start", ""))),
-                end=str(it.get("ContentDate", {}).get("End", it.get("ContentDate/End", ""))),
-                geofootprint=geo,
-                coverage_ratio=float(cov),
-                cloud_cover=cloud,
-            ))
+            out.append(
+                ProductHit(
+                    cdse_id=str(it["Id"]),
+                    name=name,
+                    start=str(
+                        it.get("ContentDate", {}).get(
+                            "Start", it.get("ContentDate/Start", "")
+                        )
+                    ),
+                    end=str(
+                        it.get("ContentDate", {}).get(
+                            "End", it.get("ContentDate/End", "")
+                        )
+                    ),
+                    geofootprint=geo,
+                    coverage_ratio=float(cov),
+                    cloud_cover=cloud,
+                )
+            )
 
         next_link = js.get("@odata.nextLink")
         if not next_link:

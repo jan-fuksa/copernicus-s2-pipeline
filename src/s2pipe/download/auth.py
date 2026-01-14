@@ -44,5 +44,7 @@ def get_access_token(auth: CDSEAuth, timeout_s: int = 60) -> str:
     r.raise_for_status()
     js = r.json()
     if "access_token" not in js:
-        raise RuntimeError(f"OAuth response missing access_token: keys={list(js.keys())}")
+        raise RuntimeError(
+            f"OAuth response missing access_token: keys={list(js.keys())}"
+        )
     return str(js["access_token"])
