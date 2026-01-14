@@ -20,13 +20,13 @@ from s2pipe.download.odata import (
 )
 from s2pipe.download.nodes import index_product_nodes
 from s2pipe.download.select import select_assets_l1c, select_assets_l2a
-from s2pipe.download.download import download_node, pair_dir
+from s2pipe.download.download import download_node, scene_dir
 from s2pipe.download.paths import make_paths, ensure_dirs
 from s2pipe.download.manifest import (
     FileItem,
     LevelFiles,
-    PairEntry,
-    PairKey,
+    SceneEntry,
+    SceneKey,
     ProductInfo,
     new_manifest,
     write_manifest_json,
@@ -34,12 +34,12 @@ from s2pipe.download.manifest import (
     update_download_index,
     parse_scl_percentages_from_mtd_tl,
 )
-from s2pipe.download.export import pairs_to_dataframe, export_table
+from s2pipe.download.export import scenes_to_dataframe, export_table
 
 
 @dataclass(frozen=True)
 class RunResult:
-    pairs: list[PairEntry]
+    scenes: list[SceneEntry]
     manifest_path: Optional[Path] = None
     table_csv_path: Optional[Path] = None
     table_xlsx_path: Optional[Path] = None
@@ -57,7 +57,7 @@ def _group_best(products: list[ProductHit]) -> dict[tuple[str, Any], ProductHit]
     return best
 
 
-def _pair_l1c_l2a(
+def _assemble_scenes(
     l1c: list[ProductHit], l2a: list[ProductHit]
 ) -> list[tuple[str, Any, ProductHit, ProductHit]]:
     l1c_best = _group_best(l1c)
@@ -117,13 +117,13 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         include_attributes=False,
     )
 
-    pairs_raw = _pair_l1c_l2a(l1c_hits, l2a_hits)
-    if cfg.control.max_pairs is not None:
-        pairs_raw = pairs_raw[: cfg.control.max_pairs]
+    scenes_raw = _assemble_scenes(l1c_hits, l2a_hits)
+    if cfg.control.max_scenes is not None:
+        scenes_raw = scenes_raw[: cfg.control.max_scenes]
 
-    pair_entries: list[PairEntry] = []
+    scene_entries: list[SceneEntry] = []
 
-    for tile, sensing_dt, l1c, l2a in pairs_raw:
+    for tile, sensing_dt, l1c, l2a in scenes_raw:
         sensing_iso = (
             sensing_dt.astimezone(timezone.utc)
             .replace(microsecond=0)
@@ -155,10 +155,10 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         nodes_l2a = select_assets_l2a(idx_l2a, cfg.selection)
 
         # Download paths
-        l1c_root = pair_dir(
+        l1c_root = scene_dir(
             paths.raw_l1c, tile_id=tile, sensing_compact=sensing_compact
         )
-        l2a_root = pair_dir(
+        l2a_root = scene_dir(
             paths.raw_l2a, tile_id=tile, sensing_compact=sensing_compact
         )
 
@@ -292,9 +292,9 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             scl_percentages=scl_pct,
         )
 
-        pair_entries.append(
-            PairEntry(
-                key=PairKey(tile_id=tile, sensing_start_utc=sensing_iso),
+        scene_entries.append(
+            SceneEntry(
+                key=SceneKey(tile_id=tile, sensing_start_utc=sensing_iso),
                 l1c=l1c_info,
                 l2a=l2a_info,
                 files_l1c=LevelFiles(
@@ -328,7 +328,7 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             dry_run=cfg.download.dry_run,
             out_dir=str(paths.root),
             layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
-            pairs=pair_entries,
+            scenes=scene_entries,
         )
         # write per-run outputs under meta/manifest/runs/<RUN_ID>/
         run_id = run_id_now()
@@ -339,9 +339,9 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         manifest_path = run_dir / cfg.manifest.json_name
         write_manifest_json(m, manifest_path)
 
-        # Load pairs (dict form) from the run manifest
-        pairs_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get(
-            "pairs", []
+        # Load scenes (dict form) from the run manifest
+        scenes_payload = json.loads(manifest_path.read_text(encoding="utf-8")).get(
+            "scenes", []
         )
 
         # update aggregated index.json.
@@ -353,18 +353,18 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                 manifest_version=cfg.manifest.manifest_version,
                 out_dir=str(paths.root),
                 layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
-                new_pairs=pairs_payload,
+                new_scenes=scenes_payload,
             )
 
     if cfg.manifest.export_table and manifest_path is not None:
         # Export per-run 2D table next to the run manifest
-        df = pairs_to_dataframe(pairs_payload)
+        df = scenes_to_dataframe(scenes_payload)
         table_csv_path = manifest_path.parent / cfg.manifest.table_csv_name
         table_xlsx_path = manifest_path.parent / cfg.manifest.table_xlsx_name
         export_table(df, csv_path=str(table_csv_path), xlsx_path=str(table_xlsx_path))
 
     return RunResult(
-        pairs=pair_entries,
+        scenes=scene_entries,
         manifest_path=manifest_path,
         table_csv_path=table_csv_path,
         table_xlsx_path=table_xlsx_path,

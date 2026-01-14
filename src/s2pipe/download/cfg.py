@@ -86,7 +86,7 @@ class DownloadConfig:
 
 @dataclass(frozen=True)
 class RunControlConfig:
-    max_pairs: Optional[int] = None
+    max_scenes: Optional[int] = None
 
 
 @dataclass(frozen=True)

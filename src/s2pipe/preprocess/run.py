@@ -244,7 +244,7 @@ def _build_angles_asset(*, assets: Any, cfg: PreprocessConfig) -> Raster | None:
 def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
     """Step-2 orchestrator.
 
-    Per (tile_id, sensing_start_utc) pair:
+    Per (tile_id, sensing_start_utc) scene:
       1) read Step-1 index.json
       2) select required assets
       3) choose target grid from a reference raster (cfg.target_grid_ref)
@@ -274,14 +274,14 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
     if norm_mode == "compute_only":
         acc: HistogramAccumulator = hist_init(list(cfg.l1c_bands), cfg.normalize)
 
-        for i, pair in enumerate(index.pairs):
-            if cfg.max_pairs is not None and i >= int(cfg.max_pairs):
+        for i, scene in enumerate(index.scenes):
+            if cfg.max_scenes is not None and i >= int(cfg.max_scenes):
                 break
 
             try:
                 # For stats-only run we do not need angles metadata.
                 assets = select_assets(
-                    pair,
+                    scene,
                     index,
                     l1c_bands=tuple(cfg.l1c_bands),
                     need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
@@ -307,8 +307,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
                 acc.scenes_skipped += 1
                 log.warning(
                     "Skipping scene in compute_only mode: tile=%s sensing=%s error=%s",
-                    pair.tile_id,
-                    pair.sensing_start_utc,
+                    scene.tile_id,
+                    scene.sensing_start_utc,
                     str(e),
                 )
                 continue
@@ -345,15 +345,15 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
             to_toa_reflectance=bool(cfg.to_toa_reflectance),
         )
 
-    for i, pair in enumerate(index.pairs):
-        if cfg.max_pairs is not None and i >= int(cfg.max_pairs):
+    for i, scene in enumerate(index.scenes):
+        if cfg.max_scenes is not None and i >= int(cfg.max_scenes):
             break
 
-        key = {"tile_id": pair.tile_id, "sensing_start_utc": pair.sensing_start_utc}
+        key = {"tile_id": scene.tile_id, "sensing_start_utc": scene.sensing_start_utc}
 
         try:
             assets = select_assets(
-                pair,
+                scene,
                 index,
                 l1c_bands=tuple(cfg.l1c_bands),
                 need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
@@ -397,7 +397,7 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
                 extra_filenames["angles"] = cfg.angles.output_name
 
             # Scene-level metadata (stored in meta.json)
-            geo = pair.l2a.geofootprint or pair.l1c.geofootprint
+            geo = scene.l2a.geofootprint or scene.l1c.geofootprint
             meta_extra = {
                 "scene": {
                     "cloud_cover": assets.cloud_cover,
@@ -410,8 +410,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
             sample = write_processed_sample(
                 out_dir,
-                tile_id=pair.tile_id,
-                sensing_start_utc=pair.sensing_start_utc,
+                tile_id=scene.tile_id,
+                sensing_start_utc=scene.sensing_start_utc,
                 x=x,
                 y=y,
                 meta_extra=meta_extra,
@@ -483,8 +483,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
             log.exception(
                 "Step-2 preprocess failed for tile=%s sensing=%s",
-                pair.tile_id,
-                pair.sensing_start_utc,
+                scene.tile_id,
+                scene.sensing_start_utc,
             )
 
     return PreprocessResult(

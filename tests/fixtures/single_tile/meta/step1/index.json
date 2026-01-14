@@ -13,7 +13,7 @@
     "out_dir": "tests/fixtures/single_tile",
     "layout": "raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>"
   },
-  "pairs": [
+  "scenes": [
     {
       "key": {
         "tile_id": "T33UWQ",

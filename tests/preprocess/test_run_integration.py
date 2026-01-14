@@ -45,15 +45,15 @@ def _join_if_relative(root: Path, p: str | Path) -> Path:
 
 def _choose_available_l1c_band(index_path: Path) -> str:
     idx = load_download_index(index_path)
-    if not idx.pairs:
-        pytest.skip("Fixture index.json contains no pairs.")
-    pair0 = idx.pairs[0]
+    if not idx.scenes:
+        pytest.skip("Fixture index.json contains no scenes.")
+    scene0 = idx.scenes[0]
 
     candidates = ("B02", "B01", "B03", "B04", "B08", "B11", "B12")
     for b in candidates:
         try:
             _ = select_assets(
-                pair0,
+                scene0,
                 idx,
                 l1c_bands=(b,),
                 need_l1c_tile_metadata=False,
@@ -91,7 +91,7 @@ def _make_cfg(index_json: Path, out_dir: Path, run_id: str, band: str):
             kwargs[name] = out_dir
         elif name == "run_id":
             kwargs[name] = run_id
-        elif name == "max_pairs":
+        elif name == "max_scenes":
             kwargs[name] = 1
         elif name == "l1c_bands":
             kwargs[name] = (band,)
@@ -144,7 +144,7 @@ def _extract_first_sample_record(step2_index: dict[str, Any]) -> dict[str, Any]:
         return samples[0]
 
     # Some variants might store records under another key; try a few fallbacks.
-    for k in ("items", "records", "pairs"):
+    for k in ("items", "records", "scenes"):
         v = step2_index.get(k)
         if isinstance(v, list) and v:
             assert isinstance(v[0], dict)

@@ -5,10 +5,10 @@ import pytest
 
 from s2pipe.preprocess.inputs import (
     load_download_index,
-    iter_pairs,
+    iter_scenes,
     select_assets,
     DownloadIndex,
-    IndexPair,
+    IndexScene,
     SelectedAssets,
 )
 
@@ -30,8 +30,8 @@ def test_load_iter_select_assets():
     assert index_path.is_file()
     d = load_download_index(index_path)
     assert isinstance(d, DownloadIndex)
-    for item in iter_pairs(d):
-        assert isinstance(item, IndexPair)
+    for item in iter_scenes(d):
+        assert isinstance(item, IndexScene)
         a = select_assets(
             item,
             d,

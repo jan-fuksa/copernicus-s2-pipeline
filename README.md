@@ -78,13 +78,13 @@ cfg = PipelineConfig(
     selection=SelectionConfig(),
     nodes_index=NodesIndexConfig(),
     download=DownloadConfig(out_dir=Path("./out"), dry_run=True),
-    control=RunControlConfig(max_pairs=3),
+    control=RunControlConfig(max_scenes=3),
     manifest=ManifestConfig(),
 )
 
 auth = prompt_auth()
 result = run_download(cfg, auth=auth)
-print("Pairs:", len(result.pairs))
+print("Scenes:", len(result.scenes))
 print("Manifest:", result.manifest_path)
 ```
 ### Preprocess
@@ -204,7 +204,7 @@ The Python API mirrors the configuration structure:
 - `selection`: which assets to download (bands, metadata, SCL, etc.)
 - `nodes_index`: indexing/listing behavior and caching (optional)
 - `download`: output paths and download behavior (dry-run, overwrite, chunk size, etc.)
-- `control`: run limits (e.g. max number of pairs)
+- `control`: run limits (e.g. max number of scenes)
 - `manifest`: how the manifest and optional tables are written
 
 ### `query`
@@ -217,7 +217,7 @@ Controls the product search window and filters.
 - `top`: maximum number of products to return per query.
 
 ### `selection`
-Controls *which* files are required for each product/pair.
+Controls *which* files are required for each product/scene.
 
 - `l1c_bands`: list/tuple of L1C bands to download (e.g. `"B02"`, `"B03"`, `"B04"`, `"B08"`, `"B11"`, `"B12"`).
 - `l1c_product_metadata` (bool): if `true` download L1C product metadata (required for TOA reflectance in preprocess).
@@ -235,7 +235,7 @@ Controls where and how files are saved.
 ### `control`
 Run limits and safety controls.
 
-- `max_pairs`: limit how many (L1C,L2A) pairs are processed in one run.
+- `max_scenes`: limit how many (L1C,L2A) scenes are processed in one run.
 
 ### `manifest`
 Controls what metadata files are written for later steps.

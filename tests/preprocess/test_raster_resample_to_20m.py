@@ -32,11 +32,11 @@ def test_resample_10m_and_60m_to_20m_grid_from_scl():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 
     index = load_download_index(index_path)
-    assert len(index.pairs) >= 1, "Expected at least one pair in index.json"
-    pair = index.pairs[0]
+    assert len(index.scenes) >= 1, "Expected at least one scene in index.json"
+    scene = index.scenes[0]
 
     assets = select_assets(
-        pair,
+        scene,
         index,
         l1c_bands=["B02", "B01"],  # B02=10m, B01=60m
         need_l1c_tile_metadata=False,
@@ -84,11 +84,11 @@ def test_scl_nearest_preserves_integer_classes_on_20m_grid():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 
     index = load_download_index(index_path)
-    assert len(index.pairs) >= 1, "Expected at least one pair in index.json"
-    pair = index.pairs[0]
+    assert len(index.scenes) >= 1, "Expected at least one scene in index.json"
+    scene = index.scenes[0]
 
     assets = select_assets(
-        pair,
+        scene,
         index,
         l1c_bands=[],  # no L1C bands needed for this test
         need_l1c_tile_metadata=False,

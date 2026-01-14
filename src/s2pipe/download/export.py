@@ -30,7 +30,7 @@ def manifest_to_dataframe(
     { tile_id, sensing_start, ..., local_paths: {k: path, ...} }.
 
     For the new structured manifest (DownloadManifest), prefer exporting from
-    PairEntry structures (see `pairs_to_dataframe` below).
+    SceneEntry structures (see `scenes_to_dataframe` below).
     """
     rows: list[dict[str, Any]] = []
     for r in manifest_rows:
@@ -57,7 +57,9 @@ def manifest_to_dataframe(
         base = {k: v for k, v in d.items() if k != "local_paths"}
 
         if keep_local_paths_json:
-            base["local_paths_json"] = json.dumps(lp, ensure_ascii=False) if isinstance(lp, Mapping) else None
+            base["local_paths_json"] = (
+                json.dumps(lp, ensure_ascii=False) if isinstance(lp, Mapping) else None
+            )
 
         if flatten_local_paths:
             if isinstance(lp, Mapping):
@@ -75,14 +77,14 @@ def manifest_to_dataframe(
     return df
 
 
-def pairs_to_dataframe(pairs: Sequence[dict[str, Any]]) -> pd.DataFrame:
+def scenes_to_dataframe(scenes: Sequence[dict[str, Any]]) -> pd.DataFrame:
     """
-    Convert manifest['pairs'] (structured PairEntry dicts) to a 2D table.
-    - One row per pair
+    Convert manifest['scenes'] (structured SceneEntry dicts) to a 2D table.
+    - One row per scene
     - Columns include key fields + l1c/l2a metadata + file paths (flattened by role)
     """
     rows: list[dict[str, Any]] = []
-    for p in pairs:
+    for p in scenes:
         row: dict[str, Any] = {}
         key = p.get("key", {})
         row["tile_id"] = key.get("tile_id")
@@ -118,7 +120,9 @@ def pairs_to_dataframe(pairs: Sequence[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def export_table(df: pd.DataFrame, *, csv_path: str | None = None, xlsx_path: str | None = None) -> None:
+def export_table(
+    df: pd.DataFrame, *, csv_path: str | None = None, xlsx_path: str | None = None
+) -> None:
     if csv_path:
         df.to_csv(csv_path, index=False)
     if xlsx_path:

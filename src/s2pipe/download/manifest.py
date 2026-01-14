@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Tuple, Optional, Sequence
+from typing import Any, Tuple, Optional
 import xml.etree.ElementTree as ET
 
 
@@ -13,8 +13,8 @@ class FileItem:
     role: str
     path: str
     band: Optional[str] = None
-    planned: bool = False   # True => planned only (dry-run)
-    present: bool = False   # True => file physically exists on disk
+    planned: bool = False  # True => planned only (dry-run)
+    present: bool = False  # True => file physically exists on disk
 
 
 @dataclass(frozen=True)
@@ -34,15 +34,16 @@ class ProductInfo:
     coverage_ratio: Optional[float] = None
     scl_percentages: Optional[dict[str, float]] = None
 
+
 @dataclass(frozen=True)
-class PairKey:
+class SceneKey:
     tile_id: str
     sensing_start_utc: str  # ISO8601 "Z"
 
 
 @dataclass(frozen=True)
-class PairEntry:
-    key: PairKey
+class SceneEntry:
+    key: SceneKey
     l1c: ProductInfo
     l2a: ProductInfo
     files_l1c: LevelFiles
@@ -57,7 +58,7 @@ class DownloadManifest:
     pipeline: dict[str, Any]
     query: dict[str, Any]
     output: dict[str, Any]
-    pairs: list[PairEntry]
+    scenes: list[SceneEntry]
 
 
 def parse_scl_percentages_from_mtd_tl(xml_path: Path) -> dict[str, float]:
@@ -87,7 +88,12 @@ def parse_scl_percentages_from_mtd_tl(xml_path: Path) -> dict[str, float]:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def write_manifest_json(manifest: DownloadManifest, dst: Path) -> None:
@@ -110,7 +116,7 @@ def new_manifest(
     dry_run: bool,
     out_dir: str,
     layout: str,
-    pairs: list[PairEntry],
+    scenes: list[SceneEntry],
 ) -> DownloadManifest:
     return DownloadManifest(
         manifest_version=manifest_version,
@@ -119,12 +125,17 @@ def new_manifest(
         pipeline={"name": "s2pipe", "stage": "download", "stage_version": "1.0"},
         query=query,
         output={"out_dir": out_dir, "layout": layout},
-        pairs=pairs,
+        scenes=scenes,
     )
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def run_id_now() -> str:
@@ -140,22 +151,22 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
-def _pair_key(pair_obj: dict[str, Any]) -> Tuple[str, str]:
-    k = pair_obj.get("key") or {}
+def _scene_key(scene_obj: dict[str, Any]) -> Tuple[str, str]:
+    k = scene_obj.get("key") or {}
     return (str(k.get("tile_id", "")), str(k.get("sensing_start_utc", "")))
 
 
-def merge_index_pairs(
-    existing_pairs: list[dict[str, Any]],
-    new_pairs: list[dict[str, Any]],
+def merge_index_scenes(
+    existing_scenes: list[dict[str, Any]],
+    new_scenes: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], int]:
     """Keep-first merge, dedupe by (tile_id, sensing_start_utc). Returns (merged, added_count)."""
-    merged = list(existing_pairs)
-    seen = { _pair_key(p): p for p in merged }
+    merged = list(existing_scenes)
+    seen = {_scene_key(p): p for p in merged}
 
     added = 0
-    for p in new_pairs:
-        key = _pair_key(p)
+    for p in new_scenes:
+        key = _scene_key(p)
         if key not in seen:
             merged.append(p)
             seen[key] = p
@@ -167,7 +178,9 @@ def merge_index_pairs(
         try:
             old_l2a = old.get("l2a") or {}
             new_l2a = p.get("l2a") or {}
-            if old_l2a.get("scl_percentages") is None and isinstance(new_l2a.get("scl_percentages"), dict):
+            if old_l2a.get("scl_percentages") is None and isinstance(
+                new_l2a.get("scl_percentages"), dict
+            ):
                 old_l2a["scl_percentages"] = new_l2a["scl_percentages"]
                 old["l2a"] = old_l2a
         except Exception:
@@ -182,9 +195,9 @@ def update_download_index(
     manifest_version: str,
     out_dir: str,
     layout: str,
-    new_pairs: list[dict[str, Any]],
+    new_scenes: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Load (or create) an aggregated index.json and append new pairs (deduped)."""
+    """Load (or create) an aggregated index.json and append new scenes (deduped)."""
     if index_path.exists():
         with open(index_path, "r", encoding="utf-8") as f:
             idx = json.load(f)
@@ -195,21 +208,21 @@ def update_download_index(
             "pipeline": {"name": "s2pipe", "stage": "download", "stage_version": "1.0"},
             "query": {"aggregate": True},
             "output": {"out_dir": out_dir, "layout": layout},
-            "pairs": [],
+            "scenes": [],
         }
 
-    existing_pairs = idx.get("pairs") or []
-    if not isinstance(existing_pairs, list):
-        existing_pairs = []
+    existing_scenes = idx.get("scenes") or []
+    if not isinstance(existing_scenes, list):
+        existing_scenes = []
 
-    merged, _added = merge_index_pairs(existing_pairs, new_pairs)
+    merged, _added = merge_index_scenes(existing_scenes, new_scenes)
 
     idx["manifest_version"] = manifest_version
     idx["created_utc"] = utc_now_iso()
     idx["pipeline"] = {"name": "s2pipe", "stage": "download", "stage_version": "1.0"}
     idx["query"] = {"aggregate": True}
     idx["output"] = {"out_dir": out_dir, "layout": layout}
-    idx["pairs"] = merged
+    idx["scenes"] = merged
 
     atomic_write_json(index_path, idx)
     return idx

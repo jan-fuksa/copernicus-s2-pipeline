@@ -98,7 +98,7 @@ class PreprocessConfig:
     # Output
     out_dir: Path  # output root (typically same root as Step 1)
 
-    max_pairs: int | None = None
+    max_scenes: int | None = None
     run_id: str | None = None
 
     # Target grid: always derived EXACTLY from a reference raster via grid_from_reference_raster().

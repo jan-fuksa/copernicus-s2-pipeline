@@ -1,7 +1,7 @@
 preprocess:
   index_json: "./out/meta/step1/index.json"
   out_dir: "./out"
-  max_pairs: null
+  max_scenes: null
   run_id: "apply_toa_norm_v1"
   target_grid_ref: "scl_20m"
   l1c_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]

@@ -2,10 +2,10 @@
 inputs.py
 ---------
 Utilities for Step-2 preprocessing that read the Step-1 download manifest (index.json)
-and resolve/select the concrete on-disk assets needed for a given L1C/L2A pair.
+and resolve/select the concrete on-disk assets needed for a given L1C/L2A scene.
 
 Responsibilities:
-- Parse index.json into typed dataclasses (DownloadIndex, IndexPair, ProductMeta, IndexFiles, ...).
+- Parse index.json into typed dataclasses (DownloadIndex, IndexScene, ProductMeta, IndexFiles, ...).
 - Resolve relative paths stored in the manifest to absolute paths under out_dir.
 - Select required assets (L1C bands, tile metadata XML, SCL_20m) with presence validation,
   returning a single SelectedAssets object suitable for downstream preprocessing steps.
@@ -20,19 +20,19 @@ Suggested "public API" imports (recommended)
 Core functions
 - load_download_index(index_path):
     Parse Step-1 index.json into a DownloadIndex typed structure.
-- iter_pairs(index, require_present=False):
-    Iterate over IndexPair items; optional strict presence check for all indexed files.
+- iter_scenes(index, require_present=False):
+    Iterate over IndexScene items; optional strict presence check for all indexed files.
 - resolve_path(index, rel_path):
     Convert a manifest path (relative to out_dir) to an absolute Path.
-- select_assets(pair, index, ...):
+- select_assets(scene, index, ...):
     Unified asset selector; returns SelectedAssets with resolved absolute paths and
     passthrough metadata.
 
 Core dataclasses / types
 - DownloadIndex:
-    Root object: out_dir + list of IndexPair items.
-- IndexPair:
-    One (tile_id, sensing_start_utc) pair linking L1C/L2A metas and file inventories.
+    Root object: out_dir + list of IndexScene items.
+- IndexScene:
+    One (tile_id, sensing_start_utc) scene linking L1C/L2A metas and file inventories.
 - SelectedAssets:
     Output of selection (absolute paths for bands/metadata/SCL + metadata passthrough).
 - ProductMeta:
@@ -85,7 +85,7 @@ class ProductMeta:
 
 
 @dataclass(frozen=True)
-class IndexPair:
+class IndexScene:
     tile_id: str
     sensing_start_utc: str
     l1c: ProductMeta
@@ -97,7 +97,7 @@ class IndexPair:
 @dataclass(frozen=True)
 class DownloadIndex:
     out_dir: Path
-    pairs: list[IndexPair]
+    scenes: list[IndexScene]
 
 
 @dataclass(frozen=True)
@@ -253,37 +253,37 @@ def load_download_index(index_path: Path) -> DownloadIndex:
     out_dir_str = out.get("out_dir") if isinstance(out, dict) else None
     out_dir = _resolve_out_dir(index_path, out_dir_str)
 
-    pairs_raw = js.get("pairs")
-    if not isinstance(pairs_raw, list):
-        raise ValueError("index.json: missing/invalid 'pairs' list")
+    scenes_raw = js.get("scenes")
+    if not isinstance(scenes_raw, list):
+        raise ValueError("index.json: missing/invalid 'scenes' list")
 
-    pairs: list[IndexPair] = []
-    for i, p in enumerate(pairs_raw):
+    scenes: list[IndexScene] = []
+    for i, p in enumerate(scenes_raw):
         if not isinstance(p, dict):
-            raise ValueError(f"pairs[{i}]: expected dict, got {type(p)}")
+            raise ValueError(f"scenes[{i}]: expected dict, got {type(p)}")
 
         key = p.get("key")
         if not isinstance(key, dict):
-            raise ValueError(f"pairs[{i}]: missing/invalid key")
+            raise ValueError(f"scenes[{i}]: missing/invalid key")
 
         tile_id = key.get("tile_id")
         sensing = key.get("sensing_start_utc")
         if not isinstance(tile_id, str) or not tile_id:
-            raise ValueError(f"pairs[{i}]: missing/invalid key.tile_id")
+            raise ValueError(f"scenes[{i}]: missing/invalid key.tile_id")
         if not isinstance(sensing, str) or not sensing:
-            raise ValueError(f"pairs[{i}]: missing/invalid key.sensing_start_utc")
+            raise ValueError(f"scenes[{i}]: missing/invalid key.sensing_start_utc")
 
-        l1c = _parse_product_meta(p.get("l1c", {}), context=f"pairs[{i}].l1c")
-        l2a = _parse_product_meta(p.get("l2a", {}), context=f"pairs[{i}].l2a")
+        l1c = _parse_product_meta(p.get("l1c", {}), context=f"scenes[{i}].l1c")
+        l2a = _parse_product_meta(p.get("l2a", {}), context=f"scenes[{i}].l2a")
         files_l1c = _parse_files(
-            p.get("files_l1c", {}), context=f"pairs[{i}].files_l1c"
+            p.get("files_l1c", {}), context=f"scenes[{i}].files_l1c"
         )
         files_l2a = _parse_files(
-            p.get("files_l2a", {}), context=f"pairs[{i}].files_l2a"
+            p.get("files_l2a", {}), context=f"scenes[{i}].files_l2a"
         )
 
-        pairs.append(
-            IndexPair(
+        scenes.append(
+            IndexScene(
                 tile_id=tile_id,
                 sensing_start_utc=sensing,
                 l1c=l1c,
@@ -293,20 +293,20 @@ def load_download_index(index_path: Path) -> DownloadIndex:
             )
         )
 
-    return DownloadIndex(out_dir=out_dir, pairs=pairs)
+    return DownloadIndex(out_dir=out_dir, scenes=scenes)
 
 
-def iter_pairs(
+def iter_scenes(
     index: DownloadIndex, *, require_present: bool = False
-) -> Iterator[IndexPair]:
-    """Yield pairs from the index.
+) -> Iterator[IndexScene]:
+    """Yield scenes from the index.
 
     Note:
       - Step 2 usually validates presence *after* asset selection (bands/SCL/metadata).
       - If require_present=True, this function applies a strict rule: ALL indexed items must be present.
         This may be overly strict if your index contains more assets than you plan to use.
     """
-    for p in index.pairs:
+    for p in index.scenes:
         if not require_present:
             yield p
             continue
@@ -349,7 +349,7 @@ def _pick_single_item(
 
 
 def select_assets(
-    pair: IndexPair,
+    scene: IndexScene,
     index: DownloadIndex,
     *,
     l1c_bands: Sequence[str],
@@ -359,14 +359,14 @@ def select_assets(
     need_scl_20m: bool = True,
     require_present: bool = True,
 ) -> SelectedAssets:
-    """Select and resolve required assets from one index pair."""
+    """Select and resolve required assets from one index scene."""
     # L1C bands
     bands_out: dict[str, Path] = {}
     missing_bands: list[str] = []
     for b in l1c_bands:
         try:
             it = _pick_single_item(
-                pair.files_l1c.items,
+                scene.files_l1c.items,
                 role="band",
                 band=str(b),
                 require_present=require_present,
@@ -376,14 +376,14 @@ def select_assets(
             missing_bands.append(str(b))
     if missing_bands:
         raise FileNotFoundError(
-            f"Missing required L1C bands for tile={pair.tile_id} sensing={pair.sensing_start_utc}: {missing_bands}"
+            f"Missing required L1C bands for tile={scene.tile_id} sensing={scene.sensing_start_utc}: {missing_bands}"
         )
 
     # Product-level metadata
     l1c_prod_mtd: Path | None = None
     if need_l1c_product_metadata:
         it = _pick_single_item(
-            pair.files_l1c.items,
+            scene.files_l1c.items,
             role="product_metadata",
             band=None,
             require_present=require_present,
@@ -394,7 +394,7 @@ def select_assets(
     l1c_mtd: Path | None = None
     if need_l1c_tile_metadata:
         it = _pick_single_item(
-            pair.files_l1c.items,
+            scene.files_l1c.items,
             role="tile_metadata",
             band=None,
             require_present=require_present,
@@ -404,7 +404,7 @@ def select_assets(
     l2a_mtd: Path | None = None
     if need_l2a_tile_metadata:
         it = _pick_single_item(
-            pair.files_l2a.items,
+            scene.files_l2a.items,
             role="tile_metadata",
             band=None,
             require_present=require_present,
@@ -415,7 +415,7 @@ def select_assets(
     scl_path: Path | None = None
     if need_scl_20m:
         it = _pick_single_item(
-            pair.files_l2a.items,
+            scene.files_l2a.items,
             role="scl_20m",
             band=None,
             require_present=require_present,
@@ -428,7 +428,7 @@ def select_assets(
         l1c_tile_metadata=l1c_mtd,
         l2a_tile_metadata=l2a_mtd,
         scl_20m=scl_path,
-        cloud_cover=pair.l1c.cloud_cover,
-        coverage_ratio=pair.l1c.coverage_ratio,
-        scl_percentages=pair.l2a.scl_percentages,
+        cloud_cover=scene.l1c.cloud_cover,
+        coverage_ratio=scene.l1c.coverage_ratio,
+        scl_percentages=scene.l2a.scl_percentages,
     )

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 from .http import CDSEHttpClient
 from .nodes import NodeEntry, node_value_url
@@ -15,7 +14,7 @@ class DownloadedFile:
     band: str | None = None
 
 
-def pair_dir(base: Path, *, tile_id: str, sensing_compact: str) -> Path:
+def scene_dir(base: Path, *, tile_id: str, sensing_compact: str) -> Path:
     return base / f"tile={tile_id}" / f"sensing={sensing_compact}Z" / "files"
 
 

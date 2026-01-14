@@ -276,8 +276,10 @@ def _download_cfg_from_dict(
     )
 
     control = RunControlConfig(
-        max_pairs=_get(
-            ctrl, "max_pairs", _field_default_or_missing(RunControlConfig, "max_pairs")
+        max_scenes=_get(
+            ctrl,
+            "max_scenes",
+            _field_default_or_missing(RunControlConfig, "max_scenes"),
         ),
     )
 
@@ -357,7 +359,7 @@ def _preprocess_cfg_from_dict(
     d: dict[str, Any],
     *,
     out_dir_override: str | None = None,
-    max_pairs_override: int | None = None,
+    max_scenes_override: int | None = None,
     run_id_override: str | None = None,
     num_workers_override: int | None = None,
     # CLI overrides (optional)
@@ -586,11 +588,11 @@ def _preprocess_cfg_from_dict(
         save_histograms=save_histograms,
     )
 
-    max_pairs = (
-        int(max_pairs_override)
-        if max_pairs_override is not None
+    max_scenes = (
+        int(max_scenes_override)
+        if max_scenes_override is not None
         else pd.get(
-            "max_pairs", _field_default_or_missing(PreprocessConfig, "max_pairs")
+            "max_scenes", _field_default_or_missing(PreprocessConfig, "max_scenes")
         )
     )
     run_id = (
@@ -612,7 +614,7 @@ def _preprocess_cfg_from_dict(
     cfg = PreprocessConfig(
         index_json=index_json,
         out_dir=out_dir,
-        max_pairs=(int(max_pairs) if max_pairs is not None else None),
+        max_scenes=(int(max_scenes) if max_scenes is not None else None),
         run_id=(str(run_id) if run_id is not None else None),
         target_grid_ref=str(
             pd.get(
@@ -677,7 +679,7 @@ def main() -> None:
     pp.add_argument("--config", type=str, required=True, help="Path to YAML config.")
     pp.add_argument("--out", type=str, default=None, help="Override output directory.")
     pp.add_argument(
-        "--max-pairs", type=int, default=None, help="Limit pairs processed."
+        "--max-scenes", type=int, default=None, help="Limit scenes processed."
     )
     pp.add_argument("--run-id", type=str, default=None, help="Override run_id.")
     pp.add_argument(
@@ -814,7 +816,7 @@ def main() -> None:
 
         auth = prompt_auth()
         res = run_download(cfg, auth=auth)
-        print(f"Pairs: {len(res.pairs)}")
+        print(f"Scenes: {len(res.scenes)}")
         if res.manifest_path:
             print(f"Manifest: {res.manifest_path}")
         if res.table_csv_path:
@@ -827,7 +829,7 @@ def main() -> None:
         cfg = _preprocess_cfg_from_dict(
             cfg_dict,
             out_dir_override=args.out,
-            max_pairs_override=args.max_pairs,
+            max_scenes_override=args.max_scenes,
             run_id_override=args.run_id,
             num_workers_override=args.num_workers,
             to_toa_reflectance_override=args.to_toa_reflectance,

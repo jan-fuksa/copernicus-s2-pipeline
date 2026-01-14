@@ -147,11 +147,11 @@ def test_scl_to_labels_integration_identity_on_20m_grid_with_meta():
         pytest.skip(f"Missing test data index.json at: {index_path}")
 
     index = load_download_index(index_path)
-    assert len(index.pairs) >= 1
-    pair = index.pairs[0]
+    assert len(index.scenes) >= 1
+    scene = index.scenes[0]
 
     assets = select_assets(
-        pair,
+        scene,
         index,
         l1c_bands=[],
         need_l1c_tile_metadata=False,

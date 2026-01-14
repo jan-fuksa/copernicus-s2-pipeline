@@ -35,15 +35,15 @@ def _fixture_index_path() -> Path:
 def _choose_available_l1c_band(index_path: Path) -> str:
     # Keep it robust: try a few common bands against the actual fixture contents.
     idx = load_download_index(index_path)
-    if not idx.pairs:
-        pytest.skip("Fixture index.json contains no pairs.")
-    pair0 = idx.pairs[0]
+    if not idx.scenes:
+        pytest.skip("Fixture index.json contains no scenes.")
+    scene0 = idx.scenes[0]
 
     candidates = ("B02", "B01", "B03", "B04", "B08", "B11", "B12")
     for b in candidates:
         try:
             _ = select_assets(
-                pair0,
+                scene0,
                 idx,
                 l1c_bands=(b,),
                 need_l1c_tile_metadata=False,
@@ -86,7 +86,7 @@ def _find_first_sample(step2_index: dict) -> dict:
 def _find_ok_manifest_record(records: list[dict[str, Any]]) -> dict[str, Any]:
     oks = [r for r in records if isinstance(r, dict) and r.get("status") == "ok"]
     assert oks, "No status='ok' record found in run manifest"
-    # max_pairs=1 => a single ok record expected
+    # max_scenes=1 => a single ok record expected
     return oks[0]
 
 
@@ -101,7 +101,7 @@ def test_step2_export_writes_angles_tif_and_records_it_in_meta_and_indexes(
         index_json=index_path,
         out_dir=tmp_path,
         run_id="pytest_angles_on",
-        max_pairs=1,
+        max_scenes=1,
         target_grid_ref="scl_20m",
         l1c_bands=(band,),
         to_toa_reflectance=True,
@@ -176,7 +176,7 @@ def test_step2_export_without_angles_does_not_write_angles_or_reference_it(
         index_json=index_path,
         out_dir=tmp_path,
         run_id="pytest_angles_off",
-        max_pairs=1,
+        max_scenes=1,
         target_grid_ref="scl_20m",
         l1c_bands=(band,),
         angles=AngleAssetConfig(enabled=False),
@@ -222,7 +222,7 @@ def test_step2_run_manifest_records_angles_path_when_enabled_and_omits_when_disa
         index_json=index_path,
         out_dir=tmp_path / "on",
         run_id="pytest_manifest_on",
-        max_pairs=1,
+        max_scenes=1,
         target_grid_ref="scl_20m",
         l1c_bands=(band,),
         angles=AngleAssetConfig(
@@ -263,7 +263,7 @@ def test_step2_run_manifest_records_angles_path_when_enabled_and_omits_when_disa
         index_json=index_path,
         out_dir=tmp_path / "off",
         run_id="pytest_manifest_off",
-        max_pairs=1,
+        max_scenes=1,
         target_grid_ref="scl_20m",
         l1c_bands=(band,),
         angles=AngleAssetConfig(enabled=False),
