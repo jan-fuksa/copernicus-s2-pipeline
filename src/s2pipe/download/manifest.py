@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+import xml.etree.ElementTree as ET
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Tuple, Optional
-import xml.etree.ElementTree as ET
+from typing import Any, Optional, Tuple
+
+
+STEP1_SCHEMA_V2 = "s2pipe.step1.index.v2"
 
 
 @dataclass(frozen=True)
 class FileItem:
     role: str
     path: str
-    band: Optional[str] = None
     planned: bool = False  # True => planned only (dry-run)
     present: bool = False  # True => file physically exists on disk
 
@@ -52,10 +54,9 @@ class SceneEntry:
 
 @dataclass(frozen=True)
 class DownloadManifest:
-    manifest_version: str
+    schema: str
     created_utc: str
     dry_run: bool
-    pipeline: dict[str, Any]
     query: dict[str, Any]
     output: dict[str, Any]
     scenes: list[SceneEntry]
@@ -111,7 +112,7 @@ def write_manifest_json(manifest: DownloadManifest, dst: Path) -> None:
 
 def new_manifest(
     *,
-    manifest_version: str,
+    schema: str = STEP1_SCHEMA_V2,
     query: dict[str, Any],
     dry_run: bool,
     out_dir: str,
@@ -119,10 +120,9 @@ def new_manifest(
     scenes: list[SceneEntry],
 ) -> DownloadManifest:
     return DownloadManifest(
-        manifest_version=manifest_version,
+        schema=schema,
         created_utc=_utc_now_iso(),
         dry_run=dry_run,
-        pipeline={"name": "s2pipe", "stage": "download", "stage_version": "1.0"},
         query=query,
         output={"out_dir": out_dir, "layout": layout},
         scenes=scenes,
@@ -192,10 +192,10 @@ def merge_index_scenes(
 def update_download_index(
     *,
     index_path: Path,
-    manifest_version: str,
     out_dir: str,
     layout: str,
     new_scenes: list[dict[str, Any]],
+    schema: str = STEP1_SCHEMA_V2,
 ) -> dict[str, Any]:
     """Load (or create) an aggregated index.json and append new scenes (deduped)."""
     if index_path.exists():
@@ -203,9 +203,8 @@ def update_download_index(
             idx = json.load(f)
     else:
         idx = {
-            "manifest_version": manifest_version,
+            "schema": schema,
             "created_utc": utc_now_iso(),
-            "pipeline": {"name": "s2pipe", "stage": "download", "stage_version": "1.0"},
             "query": {"aggregate": True},
             "output": {"out_dir": out_dir, "layout": layout},
             "scenes": [],
@@ -217,9 +216,8 @@ def update_download_index(
 
     merged, _added = merge_index_scenes(existing_scenes, new_scenes)
 
-    idx["manifest_version"] = manifest_version
+    idx["schema"] = schema
     idx["created_utc"] = utc_now_iso()
-    idx["pipeline"] = {"name": "s2pipe", "stage": "download", "stage_version": "1.0"}
     idx["query"] = {"aggregate": True}
     idx["output"] = {"out_dir": out_dir, "layout": layout}
     idx["scenes"] = merged
