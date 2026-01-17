@@ -4,7 +4,7 @@ preprocess:
   max_scenes: null
   run_id: "apply_toa_norm_v1"
   target_grid_ref: "scl_20m"
-  l1c_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]
+  l1c_bands: ["B01", "B02"]
 
   # Radiometry
   to_toa_reflectance: true
@@ -22,11 +22,13 @@ preprocess:
     include_view: true
     encode: "sin_cos"
     view_mode: "per_band"
-    view_bands: ["B02", "B03", "B04", "B08", "B11", "B12"]
+    view_bands: ["B01", "B02"]
     detector_aggregate: "nanmean"
     output_name: "angles.tif"
 
   labels:
+    enabled: true
+    backend: scl
     ignore_index: 255
     resample: "nearest"
     mapping: null
