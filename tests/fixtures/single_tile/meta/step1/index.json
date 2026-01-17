@@ -1,11 +1,6 @@
 {
-  "manifest_version": "1.0",
-  "created_utc": "2026-01-10T19:45:22Z",
-  "pipeline": {
-    "name": "s2pipe",
-    "stage": "download",
-    "stage_version": "1.0"
-  },
+  "schema": "s2pipe.step1.index.v2",
+  "created_utc": "2026-01-17T09:45:39Z",
   "query": {
     "aggregate": true
   },
@@ -85,30 +80,26 @@
         "root_dir": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files",
         "items": [
           {
-            "role": "product_metadata",
+            "role": "l1c.product_metadata",
             "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_MSIL1C.xml",
-            "band": null,
             "planned": false,
             "present": true
           },
           {
-            "role": "tile_metadata",
+            "role": "l1c.tile_metadata",
             "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_TL.xml",
-            "band": null,
             "planned": false,
             "present": true
           },
           {
-            "role": "band",
-            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_B02.jp2",
-            "band": "B02",
-            "planned": false,
-            "present": true
-          },
-          {
-            "role": "band",
+            "role": "l1c.band.B01",
             "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_B01.jp2",
-            "band": "B01",
+            "planned": false,
+            "present": true
+          },
+          {
+            "role": "l1c.band.B02",
+            "path": "raw/L1C/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_B02.jp2",
             "planned": false,
             "present": true
           }
@@ -118,16 +109,14 @@
         "root_dir": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files",
         "items": [
           {
-            "role": "tile_metadata",
+            "role": "l2a.tile_metadata",
             "path": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files/MTD_TL.xml",
-            "band": null,
             "planned": false,
             "present": true
           },
           {
-            "role": "scl_20m",
+            "role": "l2a.scl_20m",
             "path": "raw/L2A/tile=T33UWQ/sensing=20251210T100319Z/files/T33UWQ_20251210T100319_SCL_20m.jp2",
-            "band": null,
             "planned": false,
             "present": true
           }

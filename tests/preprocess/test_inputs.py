@@ -32,17 +32,18 @@ def test_load_iter_select_assets():
     assert isinstance(d, DownloadIndex)
     for item in iter_scenes(d):
         assert isinstance(item, IndexScene)
+        required_roles = {
+            "l1c.band.B01",
+            "l1c.band.B02",
+            "l1c.product_metadata",
+            "l1c.tile_metadata",
+            "l2a.scl_20m",
+            "l2a.tile_metadata",
+        }
         a = select_assets(
             item,
             d,
-            l1c_bands=[
-                "B01",
-                "B02",
-            ],
-            need_l1c_product_metadata=True,
-            need_l1c_tile_metadata=True,
-            need_l2a_tile_metadata=True,
-            need_scl_20m=True,
+            required_roles=required_roles,
             require_present=True,
         )
         assert isinstance(a, SelectedAssets)

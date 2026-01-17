@@ -59,7 +59,7 @@ def test_hist_update_counts_and_under_overflow_clamped() -> None:
 
     hist_update(acc, bands, masks, max_pixels_per_scene=None)
 
-    assert acc.tiles_processed == 1
+    assert acc.scenes_processed == 1
     assert int(acc.underflow_count[0]) == 1
     assert int(acc.overflow_count[0]) == 1
 
@@ -83,8 +83,8 @@ def test_hist_update_subsampling_is_deterministic() -> None:
     hist_update(acc1, bands, masks, max_pixels_per_scene=100)
     hist_update(acc2, bands, masks, max_pixels_per_scene=100)
 
-    assert acc1.tiles_processed == 1
-    assert acc2.tiles_processed == 1
+    assert acc1.scenes_processed == 1
+    assert acc2.scenes_processed == 1
     assert np.array_equal(acc1.counts, acc2.counts)
     assert int(acc1.counts.sum()) == 100
     assert int(acc2.counts.sum()) == 100
@@ -103,14 +103,14 @@ def test_stats_finalize_percentiles_and_moments_after_clipping() -> None:
     # 50 samples in bin 0 center=0.5, 50 samples in bin 9 center=9.5
     acc.counts[0, 0] = 50
     acc.counts[0, 9] = 50
-    acc.tiles_processed = 7
+    acc.scenes_processed = 7
     acc.scenes_skipped = 2
 
     stats = stats_finalize_from_hist(acc, cfg)
 
     assert stats["schema"] == "s2pipe.normalize.stats.v1"
     assert stats["moments_after_clipping"] is True
-    assert stats["tiles_processed"] == 7
+    assert stats["scenes_processed"] == 7
     assert stats["scenes_skipped"] == 2
 
     # Percentiles (ceil rank):
@@ -162,7 +162,7 @@ def test_stats_save_load_and_optional_npz(tmp_path: Path) -> None:
     cfg = _cfg(hist_range=(0.0, 1.0), hist_bin_width=0.1, clip_percentiles=None, seed=0)
     acc = hist_init(["B02"], cfg)
     acc.counts[0, 0] = 3
-    acc.tiles_processed = 1
+    acc.scenes_processed = 1
     acc.scenes_skipped = 4
 
     stats = stats_finalize_from_hist(acc, cfg)
@@ -178,7 +178,7 @@ def test_stats_save_load_and_optional_npz(tmp_path: Path) -> None:
     loaded = stats_load(stats_path)
     assert loaded["schema"] == stats["schema"]
     assert loaded["bands"] == stats["bands"]
-    assert loaded["tiles_processed"] == 1
+    assert loaded["scenes_processed"] == 1
     assert loaded["scenes_skipped"] == 4
 
 
