@@ -2,17 +2,16 @@
 inputs.py
 ---------
 Utilities for Step-2 preprocessing that read the Step-1 download manifest (index.json)
-and resolve/select the concrete on-disk assets needed for a given L1C/L2A scene.
+and resolve/select the concrete on-disk assets needed for a given scene.
 
 Responsibilities:
 - Parse index.json into typed dataclasses (DownloadIndex, IndexScene, ProductMeta, IndexFiles, ...).
 - Resolve relative paths stored in the manifest to absolute paths under out_dir.
-- Select required assets (L1C bands, tile metadata XML, SCL_20m) with presence validation,
+- Select required assets based on a set of required roles with presence validation,
   returning a single SelectedAssets object suitable for downstream preprocessing steps.
 
 Notes:
 - select_assets() is the preferred unified selector API.
-- Backwards-compatible wrapper selectors are kept temporarily for legacy callers.
 
 --------------------------------------------------------------------
 Suggested "public API" imports (recommended)
@@ -38,15 +37,10 @@ Core dataclasses / types
 - ProductMeta:
     Product-level metadata (IDs, orbit, cloud cover, coverage ratio, etc.).
 - IndexFiles, IndexFileItem:
-    File inventory for a product (role/path/band/planned/present).
+    File inventory for a product (role/path/planned/present).
 
-Legacy wrappers (optional; keep only if still used elsewhere)
-- select_l1c_band_paths(...):
-    Legacy convenience wrapper returning dict[band, Path].
-- select_tile_metadata_path(..., level="L1C"|"L2A"):
-    Legacy wrapper returning Path to MTD_TL.xml.
-- select_scl_20m_path(...):
-    Legacy wrapper returning Path to SCL 20m raster.
+
+This module intentionally does not provide any legacy selector wrappers.
 """
 
 from __future__ import annotations
@@ -54,14 +48,20 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Iterable, Iterator
+
+
+STEP1_SCHEMA_V2 = "s2pipe.step1.index.v2"
 
 
 @dataclass(frozen=True)
 class IndexFileItem:
-    role: str  # "band" | "tile_metadata" | "scl_20m" | ...
+    # Example roles:
+    # - "l1c.band.B02"
+    # - "l1c.product_metadata"
+    # - "l2a.scl_20m"
+    role: str
     path: str  # relative to out_dir
-    band: Optional[str]  # e.g. "B02" or None
     planned: bool
     present: bool
 
@@ -102,21 +102,38 @@ class DownloadIndex:
 
 @dataclass(frozen=True)
 class SelectedAssets:
-    """Resolved absolute paths for assets required by preprocessing."""
+    """Resolved absolute paths for assets selected from the Step-1 index."""
 
-    # L1C
-    l1c_bands: dict[str, Path]  # band -> absolute path
-    l1c_product_metadata: Path | None  # MTD_MSIL1C.xml (optional)
-    l1c_tile_metadata: Path | None  # MTD_TL.xml (optional)
+    paths_by_role: dict[str, Path]
 
-    # L2A
-    l2a_tile_metadata: Path | None  # MTD_TL.xml (optional)
-    scl_20m: Path | None  # SCL_20m.jp2 (optional)
-
-    # passthrough metadata (useful for Step 2 manifest)
+    # Passthrough metadata (may be used in Step-2 exports).
     cloud_cover: float | None
     coverage_ratio: float | None
     scl_percentages: dict[str, float] | None
+
+    def get(self, role: str) -> Path | None:
+        return self.paths_by_role.get(role)
+
+    def require(self, role: str) -> Path:
+        p = self.get(role)
+        if p is None:
+            raise FileNotFoundError(f"Missing required asset role={role!r}")
+        return p
+
+    def get_l1c_band(self, band: str) -> Path | None:
+        return self.get(f"l1c.band.{band}")
+
+    def require_l1c_band(self, band: str) -> Path:
+        return self.require(f"l1c.band.{band}")
+
+    def subset(self, roles: Iterable[str]) -> dict[str, Path]:
+        """Return a subset of paths_by_role containing the given roles."""
+        out: dict[str, Path] = {}
+        for r in roles:
+            p = self.get(r)
+            if p is not None:
+                out[r] = p
+        return out
 
 
 def _as_bool(x: Any, default: bool = False) -> bool:
@@ -221,7 +238,6 @@ def _parse_files(d: dict[str, Any], *, context: str) -> IndexFiles:
 
         role = it.get("role")
         path = it.get("path")
-        band = it.get("band")
 
         if not isinstance(role, str) or not role:
             raise ValueError(f"{context}: items[{i}] missing/invalid role")
@@ -232,7 +248,6 @@ def _parse_files(d: dict[str, Any], *, context: str) -> IndexFiles:
             IndexFileItem(
                 role=role,
                 path=path,
-                band=str(band) if isinstance(band, str) and band else None,
                 planned=_as_bool(it.get("planned"), default=False),
                 present=_as_bool(it.get("present"), default=False),
             )
@@ -248,6 +263,12 @@ def load_download_index(index_path: Path) -> DownloadIndex:
 
     if not isinstance(js, dict):
         raise ValueError(f"index.json: expected dict, got {type(js)}")
+
+    schema = js.get("schema")
+    if schema != STEP1_SCHEMA_V2:
+        raise ValueError(
+            f"index.json: unsupported schema={schema!r}; expected {STEP1_SCHEMA_V2!r}"
+        )
 
     out = js.get("output") if isinstance(js.get("output"), dict) else {}
     out_dir_str = out.get("out_dir") if isinstance(out, dict) else None
@@ -325,109 +346,53 @@ def resolve_path(index: DownloadIndex, rel_path: str) -> Path:
     return (index.out_dir / Path(rel_path)).resolve()
 
 
-def _pick_single_item(
-    items: list[IndexFileItem],
-    *,
-    role: str,
-    band: str | None = None,
-    require_present: bool,
-) -> IndexFileItem:
-    cand = [it for it in items if it.role == role and (band is None or it.band == band)]
-    if not cand:
-        raise FileNotFoundError(f"Missing item role={role!r} band={band!r}")
-
-    cand_present = [it for it in cand if it.present]
-    if cand_present:
-        return cand_present[0]
-
-    if require_present:
-        raise FileNotFoundError(
-            f"Item role={role!r} band={band!r} exists only as planned/non-present"
-        )
-
-    return cand[0]
-
-
 def select_assets(
     scene: IndexScene,
     index: DownloadIndex,
     *,
-    l1c_bands: Sequence[str],
-    need_l1c_product_metadata: bool = False,
-    need_l1c_tile_metadata: bool = True,
-    need_l2a_tile_metadata: bool = False,
-    need_scl_20m: bool = True,
+    required_roles: set[str],
     require_present: bool = True,
 ) -> SelectedAssets:
-    """Select and resolve required assets from one index scene."""
-    # L1C bands
-    bands_out: dict[str, Path] = {}
-    missing_bands: list[str] = []
-    for b in l1c_bands:
-        try:
-            it = _pick_single_item(
-                scene.files_l1c.items,
-                role="band",
-                band=str(b),
-                require_present=require_present,
-            )
-            bands_out[str(b)] = resolve_path(index, it.path)
-        except FileNotFoundError:
-            missing_bands.append(str(b))
-    if missing_bands:
+    """Select and resolve assets from one index scene.
+
+    The caller provides a set of required roles (e.g. {"l1c.band.B02", "l1c.product_metadata"}).
+    This function validates that each role exists in the scene inventory and, optionally,
+    that the corresponding file is present on disk.
+    """
+
+    items = scene.files_l1c.items + scene.files_l2a.items
+
+    by_role: dict[str, IndexFileItem] = {}
+    dup: set[str] = set()
+    for it in items:
+        if it.role in by_role:
+            dup.add(it.role)
+            continue
+        by_role[it.role] = it
+
+    if dup:
+        raise ValueError(
+            f"Duplicate roles in scene inventory for tile={scene.tile_id} sensing={scene.sensing_start_utc}: {sorted(dup)}"
+        )
+
+    missing: list[str] = [r for r in sorted(required_roles) if r not in by_role]
+    if missing:
         raise FileNotFoundError(
-            f"Missing required L1C bands for tile={scene.tile_id} sensing={scene.sensing_start_utc}: {missing_bands}"
+            f"Missing required roles for tile={scene.tile_id} sensing={scene.sensing_start_utc}: {missing}"
         )
 
-    # Product-level metadata
-    l1c_prod_mtd: Path | None = None
-    if need_l1c_product_metadata:
-        it = _pick_single_item(
-            scene.files_l1c.items,
-            role="product_metadata",
-            band=None,
-            require_present=require_present,
+    not_present: list[str] = [
+        r for r in sorted(required_roles) if require_present and not by_role[r].present
+    ]
+    if not_present:
+        raise FileNotFoundError(
+            f"Required roles exist but are not present on disk for tile={scene.tile_id} sensing={scene.sensing_start_utc}: {not_present}"
         )
-        l1c_prod_mtd = resolve_path(index, it.path)
 
-    # Tile metadata
-    l1c_mtd: Path | None = None
-    if need_l1c_tile_metadata:
-        it = _pick_single_item(
-            scene.files_l1c.items,
-            role="tile_metadata",
-            band=None,
-            require_present=require_present,
-        )
-        l1c_mtd = resolve_path(index, it.path)
-
-    l2a_mtd: Path | None = None
-    if need_l2a_tile_metadata:
-        it = _pick_single_item(
-            scene.files_l2a.items,
-            role="tile_metadata",
-            band=None,
-            require_present=require_present,
-        )
-        l2a_mtd = resolve_path(index, it.path)
-
-    # SCL
-    scl_path: Path | None = None
-    if need_scl_20m:
-        it = _pick_single_item(
-            scene.files_l2a.items,
-            role="scl_20m",
-            band=None,
-            require_present=require_present,
-        )
-        scl_path = resolve_path(index, it.path)
+    paths_by_role = {r: resolve_path(index, by_role[r].path) for r in required_roles}
 
     return SelectedAssets(
-        l1c_bands=bands_out,
-        l1c_product_metadata=l1c_prod_mtd,
-        l1c_tile_metadata=l1c_mtd,
-        l2a_tile_metadata=l2a_mtd,
-        scl_20m=scl_path,
+        paths_by_role=paths_by_role,
         cloud_cover=scene.l1c.cloud_cover,
         coverage_ratio=scene.l1c.coverage_ratio,
         scl_percentages=scene.l2a.scl_percentages,
