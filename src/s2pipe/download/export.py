@@ -106,11 +106,7 @@ def scenes_to_dataframe(scenes: Sequence[dict[str, Any]]) -> pd.DataFrame:
             items = files_obj.get("items", []) or []
             for it in items:
                 role = (it.get("role") or "file").strip()
-                band = it.get("band")
-                k = f"{prefix}_{role}"
-                if band:
-                    k = f"{k}_{band}"
-                row[k] = it.get("path")
+                row[role] = it.get("path")
 
         add_files("l1c", p.get("files_l1c", {}))
         add_files("l2a", p.get("files_l2a", {}))
