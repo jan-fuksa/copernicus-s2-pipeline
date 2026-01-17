@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from .angles import angles_to_sin_cos_features, parse_tile_metadata_angles
 from .cfg import PreprocessConfig

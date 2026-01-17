@@ -8,7 +8,7 @@ from typing import Any, Optional
 import json
 import re
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from s2pipe.download.cfg import PipelineConfig, validate
 from s2pipe.download.auth import CDSEAuth, get_access_token
