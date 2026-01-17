@@ -132,6 +132,7 @@ class CDSEHttpClient:
                 unit_scale=True,
                 unit_divisor=1024,
                 desc=dst.name,
+                position=1,
                 leave=False,
             ) as pbar,
         ):
