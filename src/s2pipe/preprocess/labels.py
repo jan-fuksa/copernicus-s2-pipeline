@@ -123,46 +123,45 @@ def _label_hist_len_for_dtype(
     return max_val + 1
 
 
-def scl_to_labels_with_meta(
+def resample_labels_with_meta(
     *,
-    scl: Raster,
+    label_raster: Raster,
     dst_grid: RasterGrid,
     cfg: LabelConfig,
 ) -> tuple[Raster, dict]:
-    """Convert SCL to labels on dst_grid, and return per-sample label metadata.
+    """Convert label_raster to dst_grid, and return per-sample label metadata.
 
     Metadata includes:
       - valid_pixel_ratio, valid_pixel_count, total_pixel_count
-      - scl_counts/scl_pct (SCL after resampling to dst_grid, before mapping)
       - label_counts/label_pct (final labels after mapping)
     """
     if cfg.resample != "nearest":
         raise ValueError(f"Label resampling must be 'nearest', got {cfg.resample!r}.")
 
-    scl_2d = _ensure_2d_label_array(scl.array)
-    scl_single = Raster(
-        array=scl_2d,
-        grid=scl.grid,
-        nodata=scl.nodata,
-        band_names=(scl.band_names[:1] if scl.band_names else None),
+    label_raster_2d = _ensure_2d_label_array(label_raster.array)
+    label_raster_single = Raster(
+        array=label_raster_2d,
+        grid=label_raster.grid,
+        nodata=label_raster.nodata,
+        band_names=(label_raster.band_names[:1] if label_raster.band_names else None),
     )
 
     # Nearest for categorical data. Pixels outside coverage become ignore_index.
-    scl_rs = resample_raster(
-        scl_single,
+    label_raster_rs = resample_raster(
+        label_raster_single,
         dst_grid,
         method="nearest",
         dst_nodata=int(cfg.ignore_index),
     )
-    scl_on_target = _ensure_2d_label_array(scl_rs.array)
+    label_raster_on_target = _ensure_2d_label_array(label_raster_rs.array)
 
     out_dtype = _infer_label_dtype(cfg.mapping, int(cfg.ignore_index))
 
     if cfg.mapping is None:
-        y = scl_on_target.astype(out_dtype, copy=False)
+        y = label_raster_on_target.astype(out_dtype, copy=False)
     else:
         y = _apply_mapping_lut(
-            scl_on_target,
+            label_raster_on_target,
             cfg.mapping,
             ignore_index=int(cfg.ignore_index),
             src_value_range=int(cfg.src_value_range),
@@ -176,9 +175,6 @@ def scl_to_labels_with_meta(
     )
 
     # Histograms: fixed-length where possible, without extra scans/conversions.
-    scl_counts = _hist_counts_fixed_range(
-        scl_on_target, int(cfg.src_value_range)
-    ).astype(np.int64, copy=False)
     label_hist_len = _label_hist_len_for_dtype(
         out_dtype, cfg.mapping, int(cfg.ignore_index)
     )
@@ -193,8 +189,6 @@ def scl_to_labels_with_meta(
         "valid_pixel_ratio": valid_pixel_ratio,
         "valid_pixel_count": valid_pixels,
         "total_pixel_count": total_pixels,
-        "scl_counts": _sparse_counts_dict(scl_counts),
-        "scl_pct": _sparse_pct_dict(scl_counts, total_pixels),
         "label_counts": _sparse_counts_dict(label_counts),
         "label_pct": _sparse_pct_dict(label_counts, total_pixels),
     }
@@ -206,14 +200,3 @@ def scl_to_labels_with_meta(
         band_names=["label"],
     )
     return raster_y, meta
-
-
-def scl_to_labels(
-    *,
-    scl: Raster,
-    dst_grid: RasterGrid,
-    cfg: LabelConfig,
-) -> Raster:
-    """Wrapper returning only the label raster."""
-    y, _ = scl_to_labels_with_meta(scl=scl, dst_grid=dst_grid, cfg=cfg)
-    return y
