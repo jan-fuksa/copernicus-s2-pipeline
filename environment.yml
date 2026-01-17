@@ -27,6 +27,16 @@ dependencies:
   # Test runner
   - pytest
 
+  # For Jupyter notebooks
+  - matplotlib
+  - ipykernel
+  - jupyterlab
+  - notebook
+  - ipywidgets
+  - jupyterlab_widgets
+  - widgetsnbextension
+  - tqdm
+
   # Build tooling for "pip install -e ." (PEP 517 builds etc.)
   - setuptools
   - wheel
