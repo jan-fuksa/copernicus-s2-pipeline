@@ -7,7 +7,7 @@ from rasterio.transform import from_origin
 
 from s2pipe.preprocess.cfg import LabelConfig
 from s2pipe.preprocess.inputs import load_download_index, select_assets
-from s2pipe.preprocess.labels import scl_to_labels_with_meta, scl_to_labels
+from s2pipe.preprocess.labels import resample_labels_with_meta
 from s2pipe.preprocess.raster import (
     Raster,
     RasterGrid,
@@ -41,9 +41,15 @@ def test_scl_to_labels_mapping_unknown_to_ignore_and_nodata_to_ignore_with_meta(
     )
     scl_r = Raster(array=scl, grid=grid, nodata=0)
 
-    cfg = LabelConfig(ignore_index=255, mapping={1: 10, 2: 11}, src_value_range=256)
+    cfg = LabelConfig(
+        enabled=True,
+        backend="scl",
+        ignore_index=255,
+        mapping={1: 10, 2: 11},
+        src_value_range=256,
+    )
 
-    y_r, meta = scl_to_labels_with_meta(scl=scl_r, dst_grid=grid, cfg=cfg)
+    y_r, meta = resample_labels_with_meta(label_raster=scl_r, dst_grid=grid, cfg=cfg)
     a = np.asarray(y_r.array)
 
     expected = np.array(
@@ -66,13 +72,6 @@ def test_scl_to_labels_mapping_unknown_to_ignore_and_nodata_to_ignore_with_meta(
     assert lp["11"] == 4.0 / 16.0
     assert lp["255"] == 9.0 / 16.0
 
-    sp = meta["scl_pct"]
-    assert sp["1"] == 3.0 / 16.0
-    assert sp["2"] == 4.0 / 16.0
-    assert (
-        sp["255"] == 4.0 / 16.0
-    )  # nodata=0 -> ignore_index via reproject nodata handling
-
 
 def test_scl_to_labels_no_mapping_preserves_classes_but_applies_nodata_with_meta():
     grid = _make_dummy_grid(width=3, height=2, res=20.0)
@@ -80,9 +79,11 @@ def test_scl_to_labels_no_mapping_preserves_classes_but_applies_nodata_with_meta
     scl = np.array([[0, 1, 2], [2, 1, 0]], dtype=np.uint8)
     scl_r = Raster(array=scl, grid=grid, nodata=0)
 
-    cfg = LabelConfig(ignore_index=255, mapping=None, src_value_range=256)
+    cfg = LabelConfig(
+        enabled=True, backend="scl", ignore_index=255, mapping=None, src_value_range=256
+    )
 
-    y_r, meta = scl_to_labels_with_meta(scl=scl_r, dst_grid=grid, cfg=cfg)
+    y_r, meta = resample_labels_with_meta(label_raster=scl_r, dst_grid=grid, cfg=cfg)
     a = np.asarray(y_r.array)
 
     expected = np.array([[255, 1, 2], [2, 1, 255]], dtype=np.uint8)
@@ -104,10 +105,16 @@ def test_scl_mapping_key_outside_src_value_range_raises():
     scl = np.array([[1, 2], [3, 4]], dtype=np.uint8)
     scl_r = Raster(array=scl, grid=grid, nodata=None)
 
-    cfg = LabelConfig(ignore_index=255, mapping={300: 1}, src_value_range=256)
+    cfg = LabelConfig(
+        enabled=True,
+        backend="scl",
+        ignore_index=255,
+        mapping={300: 1},
+        src_value_range=256,
+    )
 
     with pytest.raises(ValueError):
-        _ = scl_to_labels(scl=scl_r, dst_grid=grid, cfg=cfg)
+        _ = resample_labels_with_meta(label_raster=scl_r, dst_grid=grid, cfg=cfg)
 
 
 def test_labels_support_uint16_with_larger_src_value_range_and_meta():
@@ -116,9 +123,15 @@ def test_labels_support_uint16_with_larger_src_value_range_and_meta():
     lab = np.array([[1000, 1001]], dtype=np.uint16)
     lab_r = Raster(array=lab, grid=grid, nodata=None)
 
-    cfg = LabelConfig(ignore_index=65535, mapping={1000: 7}, src_value_range=2048)
+    cfg = LabelConfig(
+        enabled=True,
+        backend="scl",
+        ignore_index=65535,
+        mapping={1000: 7},
+        src_value_range=2048,
+    )
 
-    y_r, meta = scl_to_labels_with_meta(scl=lab_r, dst_grid=grid, cfg=cfg)
+    y_r, meta = resample_labels_with_meta(label_raster=lab_r, dst_grid=grid, cfg=cfg)
     a = np.asarray(y_r.array)
 
     assert a.dtype == np.uint16
@@ -150,24 +163,28 @@ def test_scl_to_labels_integration_identity_on_20m_grid_with_meta():
     assert len(index.scenes) >= 1
     scene = index.scenes[0]
 
+    required_roles = {"l2a.scl_20m"}
     assets = select_assets(
         scene,
         index,
-        l1c_bands=[],
-        need_l1c_tile_metadata=False,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=True,
+        required_roles=required_roles,
         require_present=True,
     )
-    assert assets.scl_20m is not None
+    assert assets.get("l2a.scl_20m") is not None
 
-    scl = read_raster(assets.scl_20m)
-    dst_grid = grid_from_reference_raster(assets.scl_20m)
+    scl = read_raster(assets.get("l2a.scl_20m"))
+    dst_grid = grid_from_reference_raster(assets.get("l2a.scl_20m"))
 
     identity = {i: i for i in range(0, 12)}
-    cfg = LabelConfig(ignore_index=255, mapping=identity, src_value_range=256)
+    cfg = LabelConfig(
+        enabled=True,
+        backend="scl",
+        ignore_index=255,
+        mapping=identity,
+        src_value_range=256,
+    )
 
-    y_r, meta = scl_to_labels_with_meta(scl=scl, dst_grid=dst_grid, cfg=cfg)
+    y_r, meta = resample_labels_with_meta(label_raster=scl, dst_grid=dst_grid, cfg=cfg)
     a = np.asarray(y_r.array)
 
     assert a.shape == (dst_grid.height, dst_grid.width)
@@ -176,5 +193,4 @@ def test_scl_to_labels_integration_identity_on_20m_grid_with_meta():
     assert uniq.issubset(allowed)
 
     assert "valid_pixel_ratio" in meta
-    assert "scl_pct" in meta
     assert "label_pct" in meta

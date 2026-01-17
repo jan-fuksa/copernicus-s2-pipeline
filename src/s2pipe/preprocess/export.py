@@ -17,7 +17,9 @@ class ProcessedSample:
     tile_id: str
     sensing_start_utc: str
     sample_dir: Path
-    asset_paths: dict[str, Path]  # keys: x, y, meta, and any extra assets (e.g. angles)
+    # Keys: x, y, meta, and any extra assets (e.g. angles).
+    # y may be None when labels are disabled.
+    asset_paths: dict[str, Path | None]
 
 
 def _utc_now_iso() -> str:
@@ -61,22 +63,6 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
-
-
-def _get_s2pipe_version() -> str:
-    # Best-effort; do not hard-fail if packaging metadata is missing.
-    try:
-        from importlib.metadata import version
-
-        return version("s2pipe")
-    except Exception:
-        try:
-            import s2pipe  # type: ignore
-
-            v = getattr(s2pipe, "__version__", None)
-            return str(v) if v else "unknown"
-        except Exception:
-            return "unknown"
 
 
 def _grid_to_meta(grid: RasterGrid) -> dict[str, Any]:
@@ -158,7 +144,7 @@ def write_processed_sample(
     tile_id: str,
     sensing_start_utc: str,
     x: Raster,
-    y: Raster,
+    y: Raster | None,
     meta_extra: dict[str, Any] | None = None,
     extra_assets: dict[str, Raster] | None = None,
     extra_asset_filenames: dict[str, str] | None = None,
@@ -181,13 +167,22 @@ def write_processed_sample(
 
     # Write rasters
     x_path = sample_dir / "x.tif"
-    y_path = sample_dir / "y.tif"
     meta_path = sample_dir / "meta.json"
 
     write_geotiff(x_path, x)
-    write_geotiff(y_path, y)
 
-    asset_paths: dict[str, Path] = {"x": x_path, "y": y_path, "meta": meta_path}
+    y_path: Path | None
+    if y is None:
+        y_path = None
+    else:
+        y_path = sample_dir / "y.tif"
+        write_geotiff(y_path, y)
+
+    asset_paths: dict[str, Path | None] = {
+        "x": x_path,
+        "y": y_path,
+        "meta": meta_path,
+    }
 
     extra_assets = dict(extra_assets or {})
     extra_asset_filenames = dict(extra_asset_filenames or {})
@@ -204,14 +199,20 @@ def write_processed_sample(
         asset_paths[name] = p
 
     # Build meta.json
+    rel_paths: dict[str, str | None] = {}
+    for k, v in asset_paths.items():
+        rel_paths[k] = Path(v).name if v is not None else None
+
     meta: dict[str, Any] = {
-        "schema": "s2pipe.step2.sample_meta.v1",
+        "schema": "s2pipe.step2.sample_meta.v2",
         "created_utc": _utc_now_iso(),
-        "s2pipe_version": _get_s2pipe_version(),
         "key": {"tile_id": tile_id, "sensing_start_utc": sensing_start_utc},
         # relative to sample_dir
-        "paths": {k: Path(v).name for k, v in asset_paths.items()},
-        "assets": {"x": _raster_asset_info(x), "y": _raster_asset_info(y)},
+        "paths": rel_paths,
+        "assets": {
+            "x": _raster_asset_info(x),
+            "y": _raster_asset_info(y) if y is not None else None,
+        },
     }
     for name, raster in extra_assets.items():
         meta["assets"][name] = _raster_asset_info(raster)
@@ -221,7 +222,6 @@ def write_processed_sample(
         protected = {
             "schema",
             "created_utc",
-            "s2pipe_version",
             "key",
             "paths",
             "assets",
@@ -260,9 +260,13 @@ def update_step2_index(
     step2_index_path = Path(step2_index_path)
     if step2_index_path.exists():
         doc = json.loads(step2_index_path.read_text(encoding="utf-8"))
+        if doc.get("schema") != "s2pipe.step2.index.v2":
+            raise ValueError(
+                f"Unsupported Step-2 index schema: {doc.get('schema')!r} (expected 's2pipe.step2.index.v2')"
+            )
     else:
         doc = {
-            "schema": "s2pipe.step2.index.v1",
+            "schema": "s2pipe.step2.index.v2",
             "created_utc": _utc_now_iso(),
             "updated_utc": _utc_now_iso(),
             "output": {},

@@ -284,13 +284,6 @@ def _download_cfg_from_dict(
     )
 
     manifest = ManifestConfig(
-        manifest_version=str(
-            _get(
-                man,
-                "manifest_version",
-                _field_default_or_missing(ManifestConfig, "manifest_version"),
-            )
-        ),
         write_json=bool(
             _get(
                 man,
@@ -298,9 +291,19 @@ def _download_cfg_from_dict(
                 _field_default_or_missing(ManifestConfig, "write_json"),
             )
         ),
+        runs_dir=str(
+            _get(man, "runs_dir", _field_default_or_missing(ManifestConfig, "runs_dir"))
+        ),
         json_name=str(
             _get(
                 man, "json_name", _field_default_or_missing(ManifestConfig, "json_name")
+            )
+        ),
+        index_name=str(
+            _get(
+                man,
+                "index_name",
+                _field_default_or_missing(ManifestConfig, "index_name"),
             )
         ),
         export_table=bool(
@@ -322,16 +325,6 @@ def _download_cfg_from_dict(
                 man,
                 "table_xlsx_name",
                 _field_default_or_missing(ManifestConfig, "table_xlsx_name"),
-            )
-        ),
-        runs_dir=str(
-            _get(man, "runs_dir", _field_default_or_missing(ManifestConfig, "runs_dir"))
-        ),
-        index_name=str(
-            _get(
-                man,
-                "index_name",
-                _field_default_or_missing(ManifestConfig, "index_name"),
             )
         ),
         store_geofootprint=bool(
@@ -362,6 +355,9 @@ def _preprocess_cfg_from_dict(
     max_scenes_override: int | None = None,
     run_id_override: str | None = None,
     num_workers_override: int | None = None,
+    target_grid_ref_override: str | None = None,
+    labels_enabled_override: bool | None = None,
+    labels_backend_override: str | None = None,
     # CLI overrides (optional)
     to_toa_reflectance_override: bool | None = None,
     upsample_method_override: str | None = None,
@@ -383,6 +379,7 @@ def _preprocess_cfg_from_dict(
       preprocess:
         index_json: ...
         out_dir: ...
+        target_grid_ref: ...  # e.g. B02 or scl_20m
         ...
     """
     if "preprocess" not in d or not isinstance(d["preprocess"], dict):
@@ -396,6 +393,10 @@ def _preprocess_cfg_from_dict(
         out_dir = Path(out_dir_override)
     else:
         out_dir = Path(str(_require(pd, "out_dir", "preprocess")))
+    if target_grid_ref_override is not None:
+        target_grid_ref = str(target_grid_ref_override)
+    else:
+        target_grid_ref = str(_require(pd, "target_grid_ref", "preprocess"))
 
     angles_d = pd.get("angles", {}) or {}
     labels_d = pd.get("labels", {}) or {}
@@ -447,7 +448,7 @@ def _preprocess_cfg_from_dict(
     )
 
     # Default instances (from PreprocessConfig defaults/factories). If those fields have no defaults,
-    # _field_default_or_missing will return MISSING and we will require explicit YAML keys below.
+    # _field_default_or_missing will return MISSING, and we will require explicit YAML keys below.
     angles_default = _field_default_or_missing(PreprocessConfig, "angles")
     labels_default = _field_default_or_missing(PreprocessConfig, "labels")
     norm_default = _field_default_or_missing(PreprocessConfig, "normalize")
@@ -490,7 +491,20 @@ def _preprocess_cfg_from_dict(
         output_name=str(angles_d.get("output_name", angles_default.output_name)),
     )
 
+    labels_enabled = (
+        bool(labels_enabled_override)
+        if labels_enabled_override is not None
+        else bool(labels_d.get("enabled", labels_default.enabled))
+    )
+    labels_backend = (
+        str(labels_backend_override)
+        if labels_backend_override is not None
+        else str(labels_d.get("backend", labels_default.backend))
+    )
+
     labels_cfg = LabelConfig(
+        enabled=labels_enabled,
+        backend=labels_backend,
         ignore_index=int(labels_d.get("ignore_index", labels_default.ignore_index)),
         resample=str(labels_d.get("resample", labels_default.resample)),
         mapping=mapping,
@@ -616,12 +630,7 @@ def _preprocess_cfg_from_dict(
         out_dir=out_dir,
         max_scenes=(int(max_scenes) if max_scenes is not None else None),
         run_id=(str(run_id) if run_id is not None else None),
-        target_grid_ref=str(
-            pd.get(
-                "target_grid_ref",
-                _field_default_or_missing(PreprocessConfig, "target_grid_ref"),
-            )
-        ),
+        target_grid_ref=target_grid_ref,
         l1c_bands=tuple(
             pd.get(
                 "l1c_bands", _field_default_or_missing(PreprocessConfig, "l1c_bands")
@@ -683,6 +692,12 @@ def main() -> None:
     )
     pp.add_argument("--run-id", type=str, default=None, help="Override run_id.")
     pp.add_argument(
+        "--target-grid-ref",
+        type=str,
+        default=None,
+        help="Reference asset for the target grid (required). Example: B02 or scl_20m.",
+    )
+    pp.add_argument(
         "--num-workers",
         type=int,
         default=None,
@@ -706,6 +721,31 @@ def main() -> None:
         const=False,
         default=None,
         help="Do not convert L1C DN to TOA reflectance.",
+    )
+
+    labels = pp.add_mutually_exclusive_group()
+    labels.add_argument(
+        "--labels",
+        dest="labels_enabled",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Enable label generation (write y.tif).",
+    )
+    labels.add_argument(
+        "--no-labels",
+        dest="labels_enabled",
+        action="store_const",
+        const=False,
+        default=None,
+        help="Disable label generation (do not write y.tif).",
+    )
+    pp.add_argument(
+        "--label-backend",
+        type=str,
+        default=None,
+        choices=["scl"],
+        help="Label backend to use when labels are enabled.",
     )
 
     pp.add_argument(
@@ -832,6 +872,9 @@ def main() -> None:
             max_scenes_override=args.max_scenes,
             run_id_override=args.run_id,
             num_workers_override=args.num_workers,
+            target_grid_ref_override=args.target_grid_ref,
+            labels_enabled_override=args.labels_enabled,
+            labels_backend_override=args.label_backend,
             to_toa_reflectance_override=args.to_toa_reflectance,
             upsample_method_override=args.upsample_method,
             downsample_method_override=args.downsample_method,
@@ -862,9 +905,12 @@ def main() -> None:
         print(f"Run ID: {res.run_id}")
         print(f"Processed: {res.processed_count}")
         print(f"Failed: {res.failed_count}")
-        print(f"Skipped: {res.skipped_count}")
-        print(f"Run manifest: {res.run_manifest_path}")
-        print(f"Step2 index: {res.step2_index_path}")
+        if res.manifest_path:
+            print(f"Run manifest: {res.manifest_path}")
+        if res.index_path:
+            print(f"Step2 index: {res.index_path}")
+        if res.stats_path:
+            print(f"Stats results: {res.stats_path}")
 
 
 if __name__ == "__main__":

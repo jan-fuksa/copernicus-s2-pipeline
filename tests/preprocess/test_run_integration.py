@@ -52,13 +52,13 @@ def _choose_available_l1c_band(index_path: Path) -> str:
     candidates = ("B02", "B01", "B03", "B04", "B08", "B11", "B12")
     for b in candidates:
         try:
+            required_roles = {
+                f"l1c.band.{b}",
+            }
             _ = select_assets(
                 scene0,
                 idx,
-                l1c_bands=(b,),
-                need_l1c_tile_metadata=False,
-                need_l2a_tile_metadata=False,
-                need_scl_20m=False,
+                required_roles=required_roles,
                 require_present=True,
             )
             return b

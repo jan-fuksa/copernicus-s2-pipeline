@@ -91,18 +91,18 @@ class RunControlConfig:
 
 @dataclass(frozen=True)
 class ManifestConfig:
-    manifest_version: str = "1.0"
+    write_json: bool = True
 
     # Per-run outputs (written under meta/step1/runs/<RUN_ID>/)
-    write_json: bool = True
+    runs_dir: str = "runs"  # subdir under <out_dir>/meta/step1/
     json_name: str = "manifest.json"
+
+    # aggregated across runs (deduped)
+    index_name: str = "index.json"
 
     export_table: bool = False
     table_csv_name: str = "manifest_table.csv"
     table_xlsx_name: str = "manifest_table.xlsx"
-
-    runs_dir: str = "runs"  # subdir under <out_dir>/meta/step1/
-    index_name: str = "index.json"  # aggregated across runs (deduped)
 
     # Optional:
     store_geofootprint: bool = True

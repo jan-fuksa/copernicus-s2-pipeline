@@ -54,6 +54,17 @@ class AngleAssetConfig:
 
 @dataclass(frozen=True)
 class LabelConfig:
+    """Configuration for label generation.
+
+    Labels are optional. If disabled, Step 2 will not produce y.tif, and the Step-2 index
+    will contain y_path=null.
+
+    `backend` selects the label source implementation.
+    """
+
+    enabled: bool = True
+    backend: Literal["scl"] = "scl"
+
     ignore_index: int = 255
     resample: Literal["nearest"] = "nearest"
     mapping: dict[int, int] | None = None
@@ -98,13 +109,16 @@ class PreprocessConfig:
     # Output
     out_dir: Path  # output root (typically same root as Step 1)
 
-    max_scenes: int | None = None
-    run_id: str | None = None
-
     # Target grid: always derived EXACTLY from a reference raster via grid_from_reference_raster().
     # - "scl_20m" uses the L2A SCL raster grid.
     # - otherwise use a band name, e.g. "B02".
-    target_grid_ref: str = "scl_20m"
+    # This is intentionally REQUIRED (no default) to avoid implicit dependencies and
+    # to keep runs fully reproducible.
+    target_grid_ref: str
+
+    # Run controls
+    max_scenes: int | None = None
+    run_id: str | None = None
 
     # Features
     l1c_bands: Sequence[str] = ()  # e.g. ("B02","B03","B04","B08","B11","B12")

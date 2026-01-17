@@ -22,7 +22,7 @@ class HistogramAccumulator:
     counts: np.ndarray  # (C, num_bins) uint64
     underflow_count: np.ndarray  # (C,) uint64 (diagnostics)
     overflow_count: np.ndarray  # (C,) uint64 (diagnostics)
-    tiles_processed: int = 0
+    scenes_processed: int = 0
     scenes_skipped: int = 0
     rng: np.random.Generator = field(
         repr=False, default_factory=lambda: np.random.default_rng(0)
@@ -63,7 +63,7 @@ def hist_init(band_names: List[str], cfg: NormalizeConfig) -> HistogramAccumulat
         counts=counts,
         underflow_count=under,
         overflow_count=over,
-        tiles_processed=0,
+        scenes_processed=0,
         scenes_skipped=0,
         rng=rng,
     )
@@ -138,7 +138,7 @@ def hist_update(
         bc = np.bincount(idx, minlength=nb).astype(np.uint64, copy=False)
         acc.counts[i] += bc
 
-    acc.tiles_processed += 1
+    acc.scenes_processed += 1
 
 
 def _percentile_bin_index(counts_1d: np.ndarray, p: float) -> int:
@@ -232,7 +232,7 @@ def stats_finalize_from_hist(
         if cfg.clip_percentiles is not None
         else None,
         "moments_after_clipping": True,
-        "tiles_processed": int(acc.tiles_processed),
+        "scenes_processed": int(acc.scenes_processed),
         "scenes_skipped": int(acc.scenes_skipped),
         "clip_low_by_band": clip_low_by_band,
         "clip_high_by_band": clip_high_by_band,
@@ -276,7 +276,7 @@ def stats_save(
             counts=acc.counts,
             underflow_count=acc.underflow_count,
             overflow_count=acc.overflow_count,
-            tiles_processed=np.array([acc.tiles_processed], dtype=np.int64),
+            scenes_processed=np.array([acc.scenes_processed], dtype=np.int64),
             scenes_skipped=np.array([acc.scenes_skipped], dtype=np.int64),
         )
 

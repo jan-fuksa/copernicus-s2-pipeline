@@ -141,9 +141,8 @@ def test_write_processed_sample_writes_layout_and_meta_and_extra_assets(tmp_path
 
     # meta.json content
     meta = json.loads((expected_dir / "meta.json").read_text(encoding="utf-8"))
-    assert meta["schema"] == "s2pipe.step2.sample_meta.v1"
+    assert meta["schema"] == "s2pipe.step2.sample_meta.v2"
     assert ISO_Z_RE.match(meta["created_utc"]) is not None
-    assert isinstance(meta.get("s2pipe_version"), str)
     assert meta["key"] == {"tile_id": "33UVP", "sensing_start_utc": sensing}
 
     # Paths are relative to sample_dir
@@ -208,7 +207,7 @@ def test_update_step2_index_creates_and_upserts_and_merges_output(tmp_path: Path
     update_step2_index(p, sample_rec=rec1)
     doc = json.loads(p.read_text(encoding="utf-8"))
 
-    assert doc["schema"] == "s2pipe.step2.index.v1"
+    assert doc["schema"] == "s2pipe.step2.index.v2"
     assert ISO_Z_RE.match(doc["created_utc"]) is not None
     assert ISO_Z_RE.match(doc["updated_utc"]) is not None
     assert doc["samples"] == [rec1]
@@ -245,7 +244,7 @@ def test_update_step2_index_handles_malformed_samples_and_output(tmp_path: Path)
     p.write_text(
         json.dumps(
             {
-                "schema": "s2pipe.step2.index.v1",
+                "schema": "s2pipe.step2.index.v2",
                 "created_utc": "2020-01-01T00:00:00Z",
                 "updated_utc": "2020-01-01T00:00:00Z",
                 "output": "bad",

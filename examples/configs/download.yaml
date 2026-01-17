@@ -10,7 +10,9 @@ download:
     include_attributes_in_hits: true
 
   selection:
+    l1c_bands: ["B01", "B02"]
     l1c_tile_metadata: true
+    l1c_product_metadata: true
     l2a_scl_20m: true
     l2a_tile_metadata: true
 
@@ -29,5 +31,5 @@ download:
 
   manifest:
     write_json: true
-    export_table: true
+    export_table: false
     store_geofootprint: true

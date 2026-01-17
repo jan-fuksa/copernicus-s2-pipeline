@@ -35,23 +35,25 @@ def test_resample_10m_and_60m_to_20m_grid_from_scl():
     assert len(index.scenes) >= 1, "Expected at least one scene in index.json"
     scene = index.scenes[0]
 
+    required_roles = {
+        "l1c.band.B01",
+        "l1c.band.B02",
+        "l2a.scl_20m",
+    }
     assets = select_assets(
         scene,
         index,
-        l1c_bands=["B02", "B01"],  # B02=10m, B01=60m
-        need_l1c_tile_metadata=False,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=True,
+        required_roles=required_roles,
         require_present=True,
     )
-    assert assets.scl_20m is not None, "SCL 20m is required for this test."
+    assert assets.get("l2a.scl_20m") is not None, "SCL 20m is required for this test."
 
     # Load rasters
-    b02 = read_raster(assets.l1c_bands["B02"])
-    b01 = read_raster(assets.l1c_bands["B01"])
+    b02 = read_raster(assets.get_l1c_band("B02"))
+    b01 = read_raster(assets.get_l1c_band("B01"))
 
     # Target grid: use SCL (20m) as reference
-    target_grid = grid_from_reference_raster(assets.scl_20m)
+    target_grid = grid_from_reference_raster(assets.get("l2a.scl_20m"))
 
     # Sanity: expected approximate resolutions (UTM meters)
     assert abs(target_grid.res_m - 20.0) < 0.5, (
@@ -87,19 +89,19 @@ def test_scl_nearest_preserves_integer_classes_on_20m_grid():
     assert len(index.scenes) >= 1, "Expected at least one scene in index.json"
     scene = index.scenes[0]
 
+    required_roles = {
+        "l2a.scl_20m",
+    }
     assets = select_assets(
         scene,
         index,
-        l1c_bands=[],  # no L1C bands needed for this test
-        need_l1c_tile_metadata=False,
-        need_l2a_tile_metadata=False,
-        need_scl_20m=True,
+        required_roles=required_roles,
         require_present=True,
     )
-    assert assets.scl_20m is not None, "SCL 20m is required for this test."
+    assert assets.get("l2a.scl_20m") is not None, "SCL 20m is required for this test."
 
-    scl = read_raster(assets.scl_20m)
-    target_grid = grid_from_reference_raster(assets.scl_20m)  # 20m grid
+    scl = read_raster(assets.get("l2a.scl_20m"))
+    target_grid = grid_from_reference_raster(assets.get("l2a.scl_20m"))  # 20m grid
 
     # Resample SCL to the same grid using nearest (should be a no-op in practice)
     scl_20 = resample_raster(scl, target_grid, method="nearest")

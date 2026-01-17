@@ -8,6 +8,8 @@ from typing import Any, Optional
 import json
 import re
 
+from tqdm.auto import tqdm
+
 from s2pipe.download.cfg import PipelineConfig, validate
 from s2pipe.download.auth import CDSEAuth, get_access_token
 from s2pipe.download.http import CDSEHttpClient, TokenManager
@@ -123,7 +125,9 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
 
     scene_entries: list[SceneEntry] = []
 
-    for tile, sensing_dt, l1c, l2a in scenes_raw:
+    for tile, sensing_dt, l1c, l2a in tqdm(
+        scenes_raw, desc="Processing scenes", unit="scene", position=0, leave=False
+    ):
         sensing_iso = (
             sensing_dt.astimezone(timezone.utc)
             .replace(microsecond=0)
@@ -190,26 +194,26 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             fn = n.parts[-1]
             dst = l1c_root / fn
             if fn == "MTD_TL.xml":
-                role = "tile_metadata"
+                role = "l1c.tile_metadata"
             elif fn == "MTD_MSIL1C.xml":
-                role = "product_metadata"
+                role = "l1c.product_metadata"
             elif fn.lower().endswith(".jp2"):
-                role = "band"
-            else:
-                role = "file"
-            band = None
-            if role == "band":
                 # try to parse band suffix like "_B02.jp2"
                 m = re.search(r"_B(\d\d|8A)\.jp2$", fn)
-                if m:
-                    band = "B" + m.group(1)
+                if not m:
+                    raise ValueError(
+                        f"Failed to parse L1C band name from filename: {fn!r}"
+                    )
+                band = "B" + m.group(1)
+                role = f"l1c.band.{band}"
+            else:
+                role = "file"
             if cfg.download.dry_run:
                 # still record intended path
                 file_items_l1c.append(
                     FileItem(
                         role=role,
                         path=str(dst.relative_to(paths.root)),
-                        band=band,
                         planned=True,
                     )
                 )
@@ -226,7 +230,6 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
                     FileItem(
                         role=role,
                         path=str(dst.relative_to(paths.root)),
-                        band=band,
                         planned=False,
                         present=True,
                     )
@@ -237,12 +240,19 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
         for n in nodes_l2a:
             fn = n.parts[-1]
             dst = l2a_root / fn
-            role = (
-                "tile_metadata"
-                if fn == "MTD_TL.xml"
-                else ("scl_20m" if fn.endswith("_SCL_20m.jp2") else "file")
-            )
-            if role == "tile_metadata":
+            fn_u = fn.upper()
+            if fn == "MTD_TL.xml":
+                role = "l2a.tile_metadata"
+            elif fn_u.endswith("_SCL_20M.JP2"):
+                role = "l2a.scl_20m"
+            elif fn_u.endswith("_AOT_20M.JP2"):
+                role = "l2a.aot_20m"
+            elif fn_u.endswith("_WVP_20M.JP2"):
+                role = "l2a.wvp_20m"
+            else:
+                role = "file"
+
+            if role == "l2a.tile_metadata":
                 l2a_mtd_tl_path = dst
             if cfg.download.dry_run:
                 file_items_l2a.append(
@@ -323,7 +333,6 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             "top": cfg.query.top,
         }
         m = new_manifest(
-            manifest_version=cfg.manifest.manifest_version,
             query=q,
             dry_run=cfg.download.dry_run,
             out_dir=str(paths.root),
@@ -350,7 +359,6 @@ def run_download(cfg: PipelineConfig, *, auth: CDSEAuth) -> RunResult:
             index_path = paths.manifest_dir / index_name
             update_download_index(
                 index_path=index_path,
-                manifest_version=cfg.manifest.manifest_version,
                 out_dir=str(paths.root),
                 layout="raw/<LEVEL>/tile=<TILE>/sensing=<SENSING>Z/files/<FILENAME>",
                 new_scenes=scenes_payload,
