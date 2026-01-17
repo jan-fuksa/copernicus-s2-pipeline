@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from tqdm import tqdm
 
 from .angles import angles_to_sin_cos_features, parse_tile_metadata_angles
 from .cfg import PreprocessConfig
@@ -17,15 +18,7 @@ from .export import (
     write_processed_sample,
 )
 from .inputs import load_download_index, select_assets
-from .labels import scl_to_labels_with_meta
-from .raster import (
-    Raster,
-    RasterGrid,
-    grid_from_reference_raster,
-    read_raster,
-)
-from .resample import resample_raster
-from .radiometry import parse_l1c_radiometry
+from .labels import resample_labels_with_meta
 from .normalize import (
     HistogramAccumulator,
     apply_stats_to_bands,
@@ -36,6 +29,14 @@ from .normalize import (
     stats_save,
     validate_stats,
 )
+from .radiometry import parse_l1c_radiometry
+from .raster import (
+    Raster,
+    RasterGrid,
+    grid_from_reference_raster,
+    read_raster,
+)
+from .resample import resample_raster
 
 log = logging.getLogger(__name__)
 
@@ -43,11 +44,11 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class PreprocessResult:
     run_id: str
-    run_manifest_path: Path
-    step2_index_path: Path
     processed_count: int
     failed_count: int = 0
-    skipped_count: int = 0
+    manifest_path: Path | None = None
+    index_path: Path | None = None
+    stats_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -117,25 +118,95 @@ def _default_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _relpath_str(root: Path, p: Path) -> str:
+def _relpath_str(root: Path, p: Path | None) -> str | None:
+    if p is None:
+        return None
+    root_res = Path(root).resolve()
+    p_res = Path(p).resolve()
     try:
-        return str(Path(p).resolve().relative_to(Path(root).resolve()))
-    except Exception:
-        return str(Path(p).resolve())
+        return str(p_res.relative_to(root_res))
+    except ValueError:
+        return str(p_res)
+
+
+def _role_for_target_grid_ref(cfg: PreprocessConfig) -> str:
+    ref = (cfg.target_grid_ref or "").strip()
+    if not ref:
+        raise ValueError("PreprocessConfig.target_grid_ref must be a non-empty string.")
+    if ref.lower() == "scl_20m":
+        return "l2a.scl_20m"
+    return f"l1c.band.{ref}"
+
+
+def _required_roles_from_cfg(
+    cfg: PreprocessConfig, *, for_stats_only: bool
+) -> set[str]:
+    """Compute the required Step-1 asset roles for this preprocessing run.
+
+    The returned roles are matched against the Step-1 index items. Missing roles
+    are treated as configuration/data errors and MUST raise.
+
+    Notes:
+    - The target grid reference (cfg.target_grid_ref) is always required.
+    - Labels are optional; if disabled, y.tif is not produced.
+    - Stats-only normalization pass only needs X (and the target grid reference).
+    """
+
+    roles: set[str] = set()
+
+    # Input bands are always required.
+    for b in cfg.l1c_bands:
+        roles.add(f"l1c.band.{str(b)}")
+
+    # Target grid reference is always required.
+    roles.add(_role_for_target_grid_ref(cfg))
+
+    # Radiometry metadata is required for TOA reflectance.
+    if bool(cfg.to_toa_reflectance):
+        roles.add("l1c.product_metadata")
+
+    if not for_stats_only:
+        if bool(cfg.angles.enabled):
+            roles.add("l1c.tile_metadata")
+
+        if bool(cfg.labels.enabled):
+            backend = str(cfg.labels.backend)
+            if backend == "scl":
+                roles.add("l2a.scl_20m")
+            else:
+                raise NotImplementedError(f"Unsupported labels.backend={backend!r}")
+
+    return roles
+
+
+def _asset_path(assets: Any, role: str) -> Path:
+    """Resolve an absolute asset Path by role from SelectedAssets.
+
+    This function expects SelectedAssets to expose either:
+    - assets.require(role) -> Path|str
+    - assets.paths_by_role: dict[str, Path|str]
+
+    Missing roles MUST raise (no fallback).
+    """
+
+    if hasattr(assets, "require"):
+        return Path(getattr(assets, "require")(role))
+
+    if hasattr(assets, "paths_by_role"):
+        d = getattr(assets, "paths_by_role")
+        if role not in d:
+            raise FileNotFoundError(f"Missing required asset role: {role}")
+        return Path(d[role])
+
+    raise TypeError(
+        "SelectedAssets must expose require(role) or paths_by_role for role-based access."
+    )
 
 
 def _choose_target_grid_ref_path(assets: Any, cfg: PreprocessConfig) -> Path:
-    ref = (cfg.target_grid_ref or "").strip()
-    if ref.lower() == "scl_20m":
-        if assets.scl_20m is None:
-            raise FileNotFoundError("target_grid_ref='scl_20m' but SCL_20m is missing.")
-        return Path(assets.scl_20m)
-
-    if ref not in assets.l1c_bands:
-        raise KeyError(
-            f"target_grid_ref={ref!r} not found among selected L1C bands: {sorted(assets.l1c_bands.keys())}"
-        )
-    return Path(assets.l1c_bands[ref])
+    """Resolve the reference raster path used to define the target grid."""
+    role = _role_for_target_grid_ref(cfg)
+    return _asset_path(assets, role)
 
 
 def _resolve_stats_path(cfg: PreprocessConfig, out_dir: Path) -> Path:
@@ -154,14 +225,11 @@ def _build_x(
 
     rad = None
     if cfg.to_toa_reflectance:
-        if assets.l1c_product_metadata is None:
-            raise ValueError(
-                "Missing L1C product metadata (product_metadata) required for TOA reflectance."
-            )
-        rad = parse_l1c_radiometry(Path(assets.l1c_product_metadata))
+        rad = parse_l1c_radiometry(_asset_path(assets, "l1c.product_metadata"))
 
     for b in cfg.l1c_bands:
-        p = Path(assets.l1c_bands[str(b)])
+        band = str(b)
+        p = _asset_path(assets, f"l1c.band.{band}")
         r = read_raster(p)
 
         # L1C convention: DN==0 means nodata. Enforce nodata=0 for correct resampling.
@@ -184,18 +252,18 @@ def _build_x(
 
             r_w = resample_raster(r0, dst_grid, method=method, dst_nodata=0.0)
 
-        a_dn = r_w.to_chw()[0]  # uint16/float32 according to resampling
+        a_dn = r_w.to_chw()[0]
         m = (a_dn != 0).astype(np.uint8)
 
         a = a_dn.astype(np.float32, copy=False)
         if rad is not None:
-            offset, quant = rad.get_band_params(str(b))
+            offset, quant = rad.get_band_params(band)
             valid = m.astype(bool)
             a[valid] = (a[valid] + float(offset)) / float(quant)
 
         bands.append(a)
         masks.append(m)
-        names.append(str(b))
+        names.append(band)
 
     bands_chw = np.stack(bands, axis=0).astype(np.float32, copy=False)  # (C,H,W)
     masks_chw = np.stack(masks, axis=0)  # (C,H,W) uint8
@@ -210,13 +278,20 @@ def _build_x(
 
 def _build_y_and_label_stats(
     *, assets: Any, dst_grid: RasterGrid, cfg: PreprocessConfig
-) -> tuple[Raster, dict[str, Any]]:
-    if assets.scl_20m is None:
-        raise FileNotFoundError("Missing SCL_20m; cannot build labels (y).")
+) -> tuple[Raster | None, dict[str, Any] | None]:
+    """Build optional label raster (y) and label stats."""
+    if not bool(cfg.labels.enabled):
+        return None, None
 
-    scl = read_raster(Path(assets.scl_20m))
-    y, label_stats = scl_to_labels_with_meta(scl=scl, dst_grid=dst_grid, cfg=cfg.labels)
-    return y, label_stats
+    backend = str(cfg.labels.backend)
+    if backend == "scl":
+        label_raster = read_raster(_asset_path(assets, "l2a.scl_20m"))
+        y, label_stats = resample_labels_with_meta(
+            label_raster=label_raster, dst_grid=dst_grid, cfg=cfg.labels
+        )
+        return y, label_stats
+    else:
+        raise NotImplementedError(f"Unsupported labels.backend={backend!r}")
 
 
 def _build_angles_asset(*, assets: Any, cfg: PreprocessConfig) -> Raster | None:
@@ -224,12 +299,9 @@ def _build_angles_asset(*, assets: Any, cfg: PreprocessConfig) -> Raster | None:
     if not angles_cfg.enabled:
         return None
 
-    if assets.l1c_tile_metadata is None:
-        raise FileNotFoundError(
-            "Angles enabled but L1C tile metadata (MTD_TL.xml) is missing."
-        )
-
-    ang = parse_tile_metadata_angles(Path(assets.l1c_tile_metadata), cfg=angles_cfg)
+    ang = parse_tile_metadata_angles(
+        _asset_path(assets, "l1c.tile_metadata"), cfg=angles_cfg
+    )
     # Step-2 export: keep angles on the native coarse grid => dst_grid=None
     r = angles_to_sin_cos_features(angles=ang, cfg=angles_cfg, dst_grid=None)
 
@@ -246,17 +318,22 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
     Per (tile_id, sensing_start_utc) scene:
       1) read Step-1 index.json
-      2) select required assets
+      2) select required assets by role
       3) choose target grid from a reference raster (cfg.target_grid_ref)
       4) build X by resampling selected L1C bands to target grid
-      5) build Y + label_stats from L2A SCL_20m (nearest)
+      5) optionally build Y + label stats (labels.enabled)
       6) optionally build coarse-grid angles asset (angles.tif)
       7) export x/y/meta (+ extra assets) and update run manifest + global Step-2 index.json
 
-    Note: normalization behavior is controlled by cfg.normalize.mode ("none" | "compute_only" | "apply_with_stats").
+    Note: normalization behavior is controlled by cfg.normalize.mode
+    ("none" | "compute_only" | "apply_with_stats").
     """
+
     index = load_download_index(cfg.index_json)
     out_dir = Path(cfg.out_dir).resolve()
+
+    if not (cfg.target_grid_ref or "").strip():
+        raise ValueError("target_grid_ref is required and must be non-empty.")
 
     run_id = (cfg.run_id or _default_run_id()).strip()
     run_manifest_path = out_dir / "meta" / "step2" / "runs" / f"run={run_id}.jsonl"
@@ -265,29 +342,27 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
     norm_mode = str(cfg.normalize.mode)
     stats_path = _resolve_stats_path(cfg, out_dir)
 
-    processed = 0
-    failed = 0
-    skipped = 0
-
-    need_angles = bool(cfg.angles.enabled)
-
     if norm_mode == "compute_only":
         acc: HistogramAccumulator = hist_init(list(cfg.l1c_bands), cfg.normalize)
+        required_roles = _required_roles_from_cfg(cfg, for_stats_only=True)
 
-        for i, scene in enumerate(index.scenes):
+        for i, scene in enumerate(
+            tqdm(
+                index.scenes,
+                total=len(index.scenes),
+                desc="Processing scenes",
+                unit="scene",
+                leave=False,
+            )
+        ):
             if cfg.max_scenes is not None and i >= int(cfg.max_scenes):
                 break
 
             try:
-                # For stats-only run we do not need angles metadata.
                 assets = select_assets(
                     scene,
                     index,
-                    l1c_bands=tuple(cfg.l1c_bands),
-                    need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
-                    need_l1c_tile_metadata=False,
-                    need_l2a_tile_metadata=False,
-                    need_scl_20m=True,
+                    required_roles=required_roles,
                     require_present=True,
                 )
 
@@ -328,11 +403,9 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
         return PreprocessResult(
             run_id=run_id,
-            run_manifest_path=run_manifest_path if run_manifest_path.exists() else None,
-            step2_index_path=step2_index_path if step2_index_path.exists() else None,
-            processed_count=0,
-            failed_count=0,
-            skipped_count=int(acc.scenes_skipped),
+            stats_path=stats_path,
+            processed_count=int(acc.scenes_processed),
+            failed_count=int(acc.scenes_skipped),
         )
 
     stats: dict[str, Any] | None = None
@@ -345,7 +418,20 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
             to_toa_reflectance=bool(cfg.to_toa_reflectance),
         )
 
-    for i, scene in enumerate(index.scenes):
+    required_roles = _required_roles_from_cfg(cfg, for_stats_only=False)
+
+    processed = 0
+    failed = 0
+
+    for i, scene in enumerate(
+        tqdm(
+            index.scenes,
+            total=len(index.scenes),
+            desc="Processing scenes",
+            unit="scene",
+            leave=False,
+        )
+    ):
         if cfg.max_scenes is not None and i >= int(cfg.max_scenes):
             break
 
@@ -355,11 +441,7 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
             assets = select_assets(
                 scene,
                 index,
-                l1c_bands=tuple(cfg.l1c_bands),
-                need_l1c_product_metadata=bool(cfg.to_toa_reflectance),
-                need_l1c_tile_metadata=need_angles,
-                need_l2a_tile_metadata=False,
-                need_scl_20m=True,
+                required_roles=required_roles,
                 require_present=True,
             )
 
@@ -386,9 +468,7 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
                 assets=assets, dst_grid=dst_grid, cfg=cfg
             )
 
-            angles_r = (
-                _build_angles_asset(assets=assets, cfg=cfg) if need_angles else None
-            )
+            angles_r = _build_angles_asset(assets=assets, cfg=cfg)
 
             extra_assets: dict[str, Raster] = {}
             extra_filenames: dict[str, str] = {}
@@ -398,14 +478,33 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
             # Scene-level metadata (stored in meta.json)
             geo = scene.l2a.geofootprint or scene.l1c.geofootprint
+            cloud_cover = scene.l2a.cloud_cover
+            if cloud_cover is None:
+                cloud_cover = scene.l1c.cloud_cover
+
+            coverage_fraction = scene.l2a.coverage_ratio
+            if coverage_fraction is None:
+                coverage_fraction = scene.l1c.coverage_ratio
+
+            labels_backend = str(cfg.labels.backend)
+            labels_meta = {
+                "enabled": bool(cfg.labels.enabled),
+                "backend": labels_backend,
+                "stats": label_stats if bool(cfg.labels.enabled) else None,
+                "backend_stats": (
+                    {"scl_percentages": scene.l2a.scl_percentages}
+                    if bool(cfg.labels.enabled) and labels_backend == "scl"
+                    else None
+                ),
+            }
+
             meta_extra = {
                 "scene": {
-                    "cloud_cover": assets.cloud_cover,
-                    "coverage_fraction": assets.coverage_ratio,
-                    "geofootprint": geo,  # GeoJSON if present in Step-1 index
-                    "scl_percentages": assets.scl_percentages,
+                    "cloud_cover": cloud_cover,
+                    "coverage_fraction": coverage_fraction,
+                    "geofootprint": geo,
                 },
-                "label_stats": label_stats,
+                "labels": labels_meta,
             }
 
             sample = write_processed_sample(
@@ -419,9 +518,12 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
                 extra_asset_filenames=extra_filenames or None,
             )
 
-            paths_rel = {
+            paths_rel: dict[str, Any] = {
                 name: _relpath_str(out_dir, p) for name, p in sample.asset_paths.items()
             }
+            # Contract: y_path must be present; if labels are disabled, it is null.
+            if y is None:
+                paths_rel.setdefault("y", None)
 
             ok_rec = {
                 "ts_utc": _utc_now_iso(),
@@ -489,9 +591,8 @@ def run_preprocess(cfg: PreprocessConfig) -> PreprocessResult:
 
     return PreprocessResult(
         run_id=run_id,
-        run_manifest_path=run_manifest_path if run_manifest_path.exists() else None,
-        step2_index_path=step2_index_path if step2_index_path.exists() else None,
+        manifest_path=run_manifest_path,
+        index_path=step2_index_path,
         processed_count=processed,
         failed_count=failed,
-        skipped_count=skipped,
     )
